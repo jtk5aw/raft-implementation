@@ -13,5 +13,6 @@ they need to be re-directed somehow to the leader node. I want to put my Fargate
             * 1 target group points to all the nodes
         * Have URL based routing that will route write requests to the leader target group and everything else to the other target group. 
         * Every time that a new leader is determine just need to update this ALB
-    * Using ALB scares me cause it can get pretty expensive. I'll just have to set alarms if it starts getting crazy traffic. Or just set it up for tests and then tear it down after. 
-        * I'm probably overthinking this and will just have to come back to this when I'm more awake
+    * ~Using ALB scares me cause it can get pretty expensive. I'll just have to set alarms if it starts getting crazy traffic. Or just set it up for tests and then tear it down after~. 
+        * ~I'm probably overthinking this and will just have to come back to this when I'm more awake~
+        * New olan elimates this fear 
