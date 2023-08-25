@@ -1,2 +1,5 @@
 pub mod server;
-pub mod client;
+
+pub mod raft_grpc {
+    tonic::include_proto!("raftgrpc");
+}

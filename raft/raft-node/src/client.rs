@@ -1,5 +1,5 @@
-use raft_grpc::client::raft_grpc::greeter_client::GreeterClient;
-use raft_grpc::client::raft_grpc::HelloRequest;
+use raft_grpc::raft_grpc::greeter_client::GreeterClient;
+use raft_grpc::raft_grpc::HelloRequest;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

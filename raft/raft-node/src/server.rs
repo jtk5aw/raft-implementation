@@ -1,6 +1,7 @@
 use tonic::transport::Server;
 
-use raft_grpc::server::{raft_grpc::greeter_server::GreeterServer, MyGreeter};
+use raft_grpc::server::MyGreeter;
+use raft_grpc::raft_grpc::greeter_server::GreeterServer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
