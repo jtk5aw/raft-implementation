@@ -1,0 +1,23 @@
+[package]
+name = "raft-node"
+version = "0.1.0"
+edition = "2021"
+
+# TODO: A separate client and server won't be created like this in the future
+[[bin]] # Bin to run the HelloWorld gRPC server
+name = "helloworld-server"
+path = "src/server.rs"
+
+# TODO: A separate client and server won't be created like this in the future
+[[bin]] # Bin to run the HelloWorld gRPC client
+name = "helloworld-client"
+path = "src/client.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tonic = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+
+# Local Dependencies
+raft-grpc = { path = "../raft-grpc", version = "0.1.0" }
