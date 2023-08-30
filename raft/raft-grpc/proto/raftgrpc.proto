@@ -1,17 +1,24 @@
 syntax = "proto3";
 package raftgrpc;
 
-service Greeter {
-    // Our SayHello rpc accepts HelloRequests and returns HelloReplies
-    rpc SayHello (HelloRequest) returns (HelloReply);
+// Raft paper being used as reference: https://raft.github.io/raft.pdf
+
+service RaftInternal {
+    rpc AppendEntries (AppendEntriesInput) returns (AppendEntriesOutput);
 }
 
-message HelloRequest {
-    // Request message contains the name to be greeted
-    string name = 1;
+message AppendEntriesInput {
+    // Id of the leader making an AppendEntries request
+    int64 leaderId = 1;
+    // Term of the leader making an AppendEntries request
+    int64 term = 2;
+    // Set of entries attempting to be added
+    repeated string entry = 3;
 }
 
-message HelloReply {
-    // Reply contains the greeting message
-    string message = 1;
+message AppendEntriesOutput {
+    // Term for leader to update with
+    int64 term = 1;
+    // If the response was successful or not TODO: Add more details to what that actually means
+    bool success = 2;
 }

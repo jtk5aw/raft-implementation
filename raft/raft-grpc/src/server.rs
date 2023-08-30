@@ -1,21 +1,22 @@
 use tonic::{Request, Response, Status};
 
-use super::raft_grpc::greeter_server::Greeter;
-use super::raft_grpc::{HelloReply, HelloRequest};
+use super::raft_grpc::raft_internal_server::RaftInternal;
+use super::raft_grpc::{AppendEntriesInput, AppendEntriesOutput};
 
 #[derive(Debug, Default)]
-pub struct MyGreeter {}
+pub struct RaftImpl {}
 
 #[tonic::async_trait]
-impl Greeter for MyGreeter {
-    async fn say_hello(
+impl RaftInternal for RaftImpl {
+    async fn append_entries(
         &self, 
-        request: Request<HelloRequest>,
-    ) -> Result<Response<HelloReply>, Status> {
+        request: Request<AppendEntriesInput>,
+    ) -> Result<Response<AppendEntriesOutput>, Status> {
         println!("Got a request: {:?}", request);
 
-        let reply = HelloReply {
-            message: format!("Hello {}!", request.into_inner().name).into(),
+        let reply = AppendEntriesOutput {
+            success: true,
+            term: request.into_inner().term,
         };
 
         Ok(Response::new(reply))
