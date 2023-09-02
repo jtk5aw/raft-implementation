@@ -1,14 +1,6 @@
 use std::env;
-use std::time::Duration;
 
-use tokio::task;
-use tokio::time::sleep;
-use tonic::transport::Server;
-
-use raft_grpc::server::RaftImpl;
-use raft_grpc::raft_grpc::raft_internal_server::RaftInternalServer;
-use raft_grpc::raft_grpc::raft_internal_client::RaftInternalClient;
-use raft_grpc::raft_grpc::AppendEntriesInput;
+use raft_grpc::server::{RaftImpl, RaftImplSetup};
 
 
 #[tokio::main]
@@ -24,36 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_port = args.get(2).unwrap();
     
     let addr = format!("[::1]:{}", my_port).parse()?;
-    let raft = RaftImpl::default();
+    let raft = RaftImpl::new(addr);
 
-    task::spawn(async move {
-        Server::builder()
-            .add_service(RaftInternalServer::new(raft))
-            .serve(addr)
-            .await
-    });
-
-    println!("Printing before sleep");
-
-    sleep(Duration::from_secs(5)).await;
-
-    println!("Printing after sleep");
-
-    let mut client = RaftInternalClient::connect(
-        format!("https://[::1]:{}", client_port)
-    ).await?;
-
-    let request = tonic::Request::new(AppendEntriesInput {
-        leader_id: my_port.parse().unwrap(), 
-        term: 1,
-        entry: vec![client_port.parse().unwrap()]
-    });
-
-    let response = client.append_entries(request).await;
-
-    println!("RESPONSE={:?}", response.unwrap().into_inner().success);
-
-    sleep(Duration::from_secs(5)).await;
-
+    let _ = raft.startup(addr, vec![client_port.to_owned()]).await;
+    
     Ok(())
 }
