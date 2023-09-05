@@ -1,5 +1,5 @@
 [package]
-name = "raft-node"
+name = "risdb"
 version = "0.1.0"
 edition = "2021"
 

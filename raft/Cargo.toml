@@ -2,5 +2,5 @@
 
 members = [
     "raft-grpc",
-    "raft-node"
+    "risdb"
 ]

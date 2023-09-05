@@ -1,6 +1,6 @@
 use std::env;
 
-use raft_grpc::server::{RaftImpl, RaftImplSetup};
+use raft_grpc::server::{RisDB, RisDBSetup};
 
 
 #[tokio::main]
@@ -16,9 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_port = args.get(2).unwrap();
     
     let addr = format!("[::1]:{}", my_port).parse()?;
-    let raft = RaftImpl::new(addr);
 
-    let _ = raft.startup(addr, vec![client_port.to_owned()]).await;
+
+    let _ = RisDB::startup(addr, vec![client_port.to_owned()]).await;
     
     Ok(())
 }
