@@ -1,11 +1,42 @@
 syntax = "proto3";
 package raftgrpc;
 
+import "shared.proto";
+
 // Raft paper being used as reference: https://raft.github.io/raft.pdf
 
 service RaftInternal {
+    // TODO: Flesh out this API 
+    rpc ProposeValue (ProposeValueInput) returns (ProposeValueOutput);
+    rpc GetValue (GetValueInput) returns (GetValueOutput);
+
     rpc AppendEntries (AppendEntriesInput) returns (AppendEntriesOutput);
+    rpc Ping (PingInput) returns (PingOutput);
 }
+
+/** Client Interactions **/
+
+message ProposeValueInput {
+    // Values to put
+    repeated shared.Value values = 1;
+}
+
+message ProposeValueOutput {
+    // Returns success of the request
+    bool successful = 1;
+}
+
+message GetValueInput {
+    // Values to get
+    repeated string keys = 1;
+}
+
+message GetValueOutput {
+    // Returns success of the request
+    repeated shared.Value values = 1;
+}
+
+/** Raft Interactions **/
 
 message AppendEntriesInput {
     // Id of the leader making an AppendEntries request
@@ -13,7 +44,7 @@ message AppendEntriesInput {
     // Term of the leader making an AppendEntries request
     int64 term = 2;
     // Set of entries attempting to be added
-    repeated string entry = 3;
+    repeated string entries = 3;
 }
 
 message AppendEntriesOutput {
@@ -22,3 +53,14 @@ message AppendEntriesOutput {
     // If the response was successful or not TODO: Add more details to what that actually means
     bool success = 2;
 }
+
+message PingInput {
+    // Port of the requester
+    string requester = 1;
+}
+
+message PingOutput {
+    // Port of the repsonsder
+    string responder = 1;
+}
+

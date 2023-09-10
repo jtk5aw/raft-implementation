@@ -1,0 +1,13 @@
+syntax = "proto3";
+package shared;
+
+// Using this instead of just a map (even though its just key value pairs) 
+// in case I want to change the format of what can be "put" in the future. 
+// I.E if I want to do more than key value storage I would need to something other 
+// than provide just a map
+message Value {
+    // Key to write to 
+    string key = 1;
+    // Value to associate with the above key
+    string value = 2;
+}
