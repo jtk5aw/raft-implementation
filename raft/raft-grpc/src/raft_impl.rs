@@ -83,6 +83,7 @@ impl RaftImpl {
 
 #[tonic::async_trait] 
 impl PeerSetup for PeerConnections {
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn connect_to_peers(
         self,
         addr: SocketAddr,
@@ -92,9 +93,9 @@ impl PeerSetup for PeerConnections {
         // Create vector of potential failed connections
         let mut error_vec: Vec<String> = Vec::new();
 
-        println!("Waiting for peers to start...");
+        tracing::info!("Waiting for peers to start...");
     
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(5)).await;
 
         // Attempt to create all connections
         for peer_port in peers {        
@@ -107,7 +108,7 @@ impl PeerSetup for PeerConnections {
                     addr, peer_port, client
                 ).await,
                 Err(err) => {
-                    println!("Error connecting to peer: {}", err);
+                    tracing::error!(%err, "Error connecting to peer");
                     error_vec.push(peer_port);
                 }
             }
@@ -115,13 +116,14 @@ impl PeerSetup for PeerConnections {
 
         // Return list of errored connections
         if error_vec.len() > 0 {
-            println!("Error vec: {:?}", error_vec);
+            tracing::error!(?error_vec, "Error vec");
             Err(SetupError::FailedToConnectToPeers(error_vec))
         } else {
             Ok(())
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_client_connection(
         &self,
         addr: SocketAddr,
@@ -134,7 +136,7 @@ impl PeerSetup for PeerConnections {
     
         let response = client.ping(request).await;
 
-        println!("RESPONSE={:?}", response.unwrap());
+        tracing::info!(?response, "RESPONSE");
 
         {
             let mut peers = self.peers.lock().unwrap();
@@ -151,11 +153,16 @@ impl PeerSetup for PeerConnections {
 // TODO: Add suport for other operations when writing to the log. Also actually write to the log
 #[tonic::async_trait]
 impl RaftInternal for RaftImpl {
+    #[tracing::instrument(
+        skip(self), 
+        name = "Raft:ping",
+        ret, 
+        err
+    )]
     async fn ping(
         &self,
-        request: Request<PingInput>,
+        _request: Request<PingInput>,
     ) -> Result<Response<PingOutput>, Status> {
-        println!("Raft got a ping request: {:?}", request);
 
         let response = PingOutput {
             responder: self.addr.port().to_string(),
@@ -164,13 +171,22 @@ impl RaftInternal for RaftImpl {
         Ok(Response::new(response))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        name = "Raft:append_entries",
+        fields(leader_id, term),
+        ret, 
+        err
+    )]
     async fn append_entries(
         &self, 
         request: Request<AppendEntriesInput>,
     ) -> Result<Response<AppendEntriesOutput>, Status> {
-        println!("Raft got an append_entries request: {:?}", request);
 
         let append_entries_input = request.into_inner();
+        tracing::Span::current().record("leader_id", &append_entries_input.leader_id);
+        tracing::Span::current().record("term", &append_entries_input.term);
+
 
         let values_to_write: Vec<Value> = append_entries_input.entries
             .into_iter()
@@ -207,13 +223,20 @@ impl RaftInternal for RaftImpl {
         Ok(Response::new(reply))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        name = "Raft:get_value",
+        fields(request_id),
+        ret, 
+        err
+    )]
     async fn get_value(
         &self,
         request: Request<GetValueInput>,
     ) -> Result<Response<GetValueOutput>, Status> { 
-        println!("Raft got a get_value request: {:?}", request);
 
         let get_value_input = request.into_inner();
+        tracing::Span::current().record("request_id", &get_value_input.request_id);
 
         let values = {
             let data = self.data_store.data.lock().unwrap();
@@ -232,6 +255,7 @@ impl RaftInternal for RaftImpl {
         };
 
         let reply = GetValueOutput {
+            request_id: get_value_input.request_id,
             values
         };
 
@@ -239,13 +263,20 @@ impl RaftInternal for RaftImpl {
     }
 
     // TODO: Make this actual Raft
+    #[tracing::instrument(
+        skip_all,
+        name = "Raft:propose_value",
+        fields(request_id)
+        ret, 
+        err
+    )]
     async fn propose_value(
         &self,
         request: Request<ProposeValueInput>,
     ) -> Result<Response<ProposeValueOutput>, Status> { 
-        println!("Raft got a propose_value request: {:?}", request);
 
         let propose_value_input = request.into_inner();
+        tracing::Span::current().record("request_id", &propose_value_input.request_id);
 
         // Write data locally TODO: Abstract this out into a shared method
         {
@@ -290,6 +321,7 @@ impl RaftInternal for RaftImpl {
             .count();
 
         let reply = ProposeValueOutput {
+            request_id: propose_value_input.request_id,
             successful: failure_count > 0,
         };
 

@@ -19,21 +19,29 @@ service RaftInternal {
 message ProposeValueInput {
     // Values to put
     repeated shared.Value values = 1;
+    // Request ID propagated through from RisDb
+    string requestId = 2;
 }
 
 message ProposeValueOutput {
     // Returns success of the request
     bool successful = 1;
+    // Request ID propagated through from RisDb
+    string requestId = 2;
 }
 
 message GetValueInput {
     // Values to get
     repeated string keys = 1;
+    // Request ID propagated through from RisDb
+    string requestId = 2;
 }
 
 message GetValueOutput {
     // Returns success of the request
     repeated shared.Value values = 1;
+    // Request ID propagated through from RisDb
+    string requestId = 2;
 }
 
 /** Raft Interactions **/

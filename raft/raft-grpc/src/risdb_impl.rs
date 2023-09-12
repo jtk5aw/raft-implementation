@@ -1,5 +1,6 @@
-use std::{net::SocketAddr, sync::{Arc, Mutex}};
+use std::{net::SocketAddr, sync::{Arc, Mutex}, time::Duration};
 
+use tokio::time::sleep;
 use tonic::{Request, Response, Status, transport::Channel};
 
 use crate::{risdb::{PutRequest, PutResponse, GetRequest, GetResponse, ris_db_server::RisDb}, raft_grpc::{raft_internal_client::RaftInternalClient, GetValueInput, ProposeValueInput}};
@@ -62,10 +63,16 @@ impl RaftClient {
     /**
      * Initializes the client
      */
+    #[tracing::instrument]
     pub async fn init_client(
         self, 
         addr: SocketAddr
     ) -> Result<(), RisDbSetupError> {
+
+        tracing::info!("Initializing Raft client...");
+
+        sleep(Duration::from_secs(5)).await;
+        
         let raft_client = RaftInternalClient::connect(
             format!("http://[::1]:{}", addr.port())
         ).await?;
@@ -79,20 +86,29 @@ impl RaftClient {
 
 #[tonic::async_trait] 
 impl RisDb for RisDbImpl {
+    #[tracing::instrument(
+        skip_all,
+        name = "RisDb:put",
+        fields(request_id) 
+        ret, 
+        err
+    )]
     async fn put(
         &self,
         request: Request<PutRequest>,
     ) -> Result<Response<PutResponse>, Status> {
-        println!("RisDb got a put request: {:?}", request);
-
         let put_request = request.into_inner();
+        tracing::Span::current().record("request_id", &put_request.request_id);
+
+        tracing::info!("Putting values...");
 
         let mut client = self.client()?;
 
         let _response = client.propose_value(ProposeValueInput {
+            request_id: put_request.request_id.clone(),
             values: put_request.values,
         }).await.map_err(|e| {
-            println!("Failed to put values: {:?}", e);
+            tracing::error!(?e, "Failed to put values");
             Status::internal(e.message())
         })?;
 
@@ -101,23 +117,34 @@ impl RisDb for RisDbImpl {
             success: true,
         };
 
+        tracing::info!("Successfully put values");
+
         Ok(Response::new(reply))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        name = "RisDb:get",
+        fields(request_id) 
+        ret, 
+        err
+    )]
     async fn get(
         &self,
         request: Request<GetRequest>,
     ) -> Result<Response<GetResponse>, Status> {
-        println!("RisDb got a get request: {:?}", request);
-
         let get_request = request.into_inner();
+        tracing::Span::current().record("request_id", &get_request.request_id);
+
+        tracing::info!("Getting values...");
 
         let mut client = self.client()?;
 
         let response = client.get_value(GetValueInput {
+            request_id: get_request.request_id.clone(),
             keys: get_request.keys
         }).await.map_err(|e| {
-            println!("Failed to get values: {:?}", e);
+            tracing::error!(?e, "Failed to get values");
             Status::internal(e.message())
         })?;
 
@@ -126,6 +153,8 @@ impl RisDb for RisDbImpl {
             success: true,
             values: response.into_inner().values,
         };
+
+        tracing::info!("Successfully got values");
 
         Ok(Response::new(reply))
     }

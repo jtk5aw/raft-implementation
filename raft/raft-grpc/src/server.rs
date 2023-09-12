@@ -40,6 +40,7 @@ impl From<String> for StartUpError {
 
 
 // Struct for setup
+#[derive(Debug)]
 pub struct RisDb {}
 
 
@@ -79,6 +80,7 @@ pub trait RisDbSetup  {
 
 #[tonic::async_trait]
 impl RisDbSetup for RisDb {
+    #[tracing::instrument]
     async fn startup(
         self,
         addr: SocketAddr,
@@ -114,16 +116,16 @@ impl RisDbSetup for RisDb {
         if result.is_err() {
             match result.err().unwrap() {
                 StartUpError::FailedToSetup(failures) => {
-                    println!("Failed to connect to peers: {:?}", failures);
+                    tracing::error!("Failed to connect to peers: {:?}", failures);
                 },
                 StartUpError::FailedToStartServer(err) => {
-                    println!("Failed to start the server: {:?}", err);
+                    tracing::error!("Failed to start the server: {:?}", err);
                 },
                 StartUpError::FailedToLocallyConnect(err) => {
-                    println!("Failed to connect to the local raft server: {:?}", err);
+                    tracing::error!("Failed to connect to the local raft server: {:?}", err);
                 }
                 StartUpError::CustomError(err) => {
-                    println!("Most likely a concurrency issue: {:?}", err);
+                    tracing::error!("Most likely a concurrency issue: {:?}", err);
                 }
             }
         }
