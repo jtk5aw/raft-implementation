@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Mutex, Arc}, net::SocketAddr, time::Durat
 use tokio::time::sleep;
 use tonic::{transport::Channel, Request, Response, Status};
 
-use crate::{raft_grpc::{raft_internal_client::RaftInternalClient, raft_internal_server::RaftInternal, AppendEntriesOutput, AppendEntriesInput, GetValueInput, GetValueOutput, ProposeValueOutput, ProposeValueInput, PingInput, PingOutput}, shared::Value};
+use crate::{raft_grpc::{raft_internal_client::RaftInternalClient, raft_internal_server::RaftInternal, AppendEntriesOutput, AppendEntriesInput, GetValueInput, GetValueOutput, ProposeValueOutput, ProposeValueInput, PingInput, PingOutput, LogEntry, log_entry::LogAction}, shared::Value};
 
 // Errors
 #[derive(Debug)]
@@ -53,19 +53,6 @@ pub struct RaftStableData {
     pub current_term: i64,
     pub voted_for: Option<String>,
     pub log: Vec<LogEntry>,
-}
-
-#[derive(Debug)]
-pub struct LogEntry {
-    pub action: LogAction,
-    pub term: i64,
-    pub value: Value
-}
-
-#[derive(Debug)]
-pub enum LogAction {
-    Put,
-    Delete,
 }
 
 #[derive(Debug, Clone)]
@@ -258,21 +245,9 @@ impl RaftInternal for RaftImpl {
         tracing::Span::current().record("leader_id", &append_entries_input.leader_id);
         tracing::Span::current().record("term", &append_entries_input.term);
 
-        // TODO: If the value has a "," in it this doesn't work. Fix that
         let values_to_write: Vec<Value> = append_entries_input.entries
             .into_iter()
-            .map(|entry| {
-                let mut split_iter = entry.split(",");
-                (
-                    split_iter.next().unwrap().to_owned(), 
-                    split_iter.next().unwrap().to_owned(), 
-                    split_iter.next().unwrap().to_owned()
-                )
-            })
-            .map(|(_operation, key, value)| Value {
-                key: key.to_owned(),
-                value: value.to_owned(),
-            })
+            .map(|entry| entry.value.unwrap())
             .collect();
 
         // Write data locally TODO: Abstract this out into a shared method
@@ -361,10 +336,13 @@ impl RaftInternal for RaftImpl {
 
         // Communicate new value to peers
         let results = {
-            let log_entries: Vec<String> = propose_value_input.values
+            let log_entries: Vec<LogEntry> = propose_value_input.values
                 .into_iter()
                 .map(|value| {
-                    format!("PUT,{},{}", value.key, value.value)
+                    LogEntry {
+                        log_action: LogAction::Put.into(),
+                        value: Some(value)
+                    }
                 })
                 .collect();
 

@@ -46,6 +46,15 @@ message GetValueOutput {
 
 /** Raft Interactions **/
 
+message LogEntry {
+    enum LogAction {
+        PUT = 0;
+        DELETE = 1;
+    }
+    LogAction logAction = 1;
+    shared.Value value = 2;
+}
+
 message AppendEntriesInput {
     reserved 1;
     // Id of the leader making an AppendEntries request
@@ -53,7 +62,7 @@ message AppendEntriesInput {
     // Term of the leader making an AppendEntries request
     int64 term = 2;
     // Set of entries attempting to be added
-    repeated string entries = 3;
+    repeated LogEntry entries = 3;
     // Log index of previous entry
     int64 prevLogIndex = 5;
     // Term of the previous log entry
