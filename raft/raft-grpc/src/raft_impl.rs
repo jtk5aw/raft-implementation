@@ -376,7 +376,11 @@ impl RaftInternal for RaftImpl {
                     peer_data.connection.unwrap().append_entries(AppendEntriesInput {
                         leader_id: self.addr.to_string(),
                         term: 1,
-                        entries: log_entries.to_owned()
+                        entries: log_entries.to_owned(),
+                        // TODO: Implement these to make Raft work
+                        prev_log_index: 0,
+                        prev_log_term: 0,
+                        leader_commit: 0,
                     }).await
                 })).await
         }; 
