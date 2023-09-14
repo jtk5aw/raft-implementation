@@ -12,20 +12,71 @@ pub enum SetupError {
 }
 
 // Structs
-
 #[derive(Debug)]
 pub struct RaftImpl {
     // Socker Address of the current server
     pub addr: SocketAddr,
-    // List of paths to other Raft Nodes
+    // List of paths to other Raft Nodes. Also contains leader state
     pub peer_connections: PeerConnections,
+    // Stable State of the Raft Node (persisted to disk) // TODO: persist this to disk
+    pub state: RaftStableState,
+    // Volatile State of the Raft Node (not persisted to disk)
+    pub volatile_state: RaftVolatileState,
     // Data map TODO: Update this to some more interesting data store (maybe) 
     pub data_store: DataStore,
 }
 
 #[derive(Debug, Clone)]
 pub struct PeerConnections {
-    pub peers: Arc<Mutex<HashMap<String, Option<RaftInternalClient<Channel>>>>>,
+    pub peers: Arc<Mutex<HashMap<String, PeerData>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerData {
+    pub connection: Option<RaftInternalClient<Channel>>,
+    pub leader_state: Option<RaftLeaderState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RaftLeaderState {
+    pub next_index: i64,
+    pub match_index: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RaftStableState {
+    pub raft_data: Arc<Mutex<RaftStableData>>,
+}
+
+#[derive(Debug)]
+pub struct RaftStableData {
+    pub current_term: i64,
+    pub voted_for: Option<String>,
+    pub log: Vec<LogEntry>,
+}
+
+#[derive(Debug)]
+pub struct LogEntry {
+    pub action: LogAction,
+    pub term: i64,
+    pub value: Value
+}
+
+#[derive(Debug)]
+pub enum LogAction {
+    Put,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct RaftVolatileState {
+    pub raft_data: Arc<Mutex<RaftVolatileData>>,
+}
+
+#[derive(Debug)]
+pub struct RaftVolatileData {
+    pub commit_index: i64,
+    pub last_applied: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +125,19 @@ impl RaftImpl {
             peer_connections: PeerConnections {
                 peers: Arc::new(Mutex::new(HashMap::new())) 
             },
+            state: RaftStableState {
+                raft_data: Arc::new(Mutex::new(RaftStableData {
+                    current_term: 0,
+                    voted_for: None,
+                    log: Vec::new(),
+                })),
+            },
+            volatile_state: RaftVolatileState {
+                raft_data: Arc::new(Mutex::new(RaftVolatileData {
+                    commit_index: 0,
+                    last_applied: 0,
+                })),
+            },
             data_store : DataStore {
                 data: Arc::new(Mutex::new(HashMap::new())),
             }
@@ -98,14 +162,16 @@ impl PeerSetup for PeerConnections {
         sleep(Duration::from_secs(5)).await;
 
         // Attempt to create all connections
-        for peer_port in peers {        
+        for peer_port in peers {   
+            let peer_addr = format!("https://[::1]:{}", peer_port);
+
             let result = RaftInternalClient::connect(
-                format!("https://[::1]:{}", peer_port)
+                peer_addr.to_owned()
             ).await;
 
             match result {
                 Ok(client) => self.handle_client_connection(
-                    addr, peer_port, client
+                    addr, peer_addr, client
                 ).await,
                 Err(err) => {
                     tracing::error!(%err, "Error connecting to peer");
@@ -127,7 +193,7 @@ impl PeerSetup for PeerConnections {
     async fn handle_client_connection(
         &self,
         addr: SocketAddr,
-        peer_port: String,
+        peer_addr: String,
         mut client: RaftInternalClient<Channel>,
     ) -> () {
         let request = tonic::Request::new(PingInput {
@@ -140,7 +206,12 @@ impl PeerSetup for PeerConnections {
 
         {
             let mut peers = self.peers.lock().unwrap();
-            peers.insert(peer_port, Some(client));
+            peers.insert(
+                peer_addr, 
+                PeerData {
+                    connection: Some(client),
+                    leader_state: None,
+                });
         }
     }
 }
@@ -187,7 +258,7 @@ impl RaftInternal for RaftImpl {
         tracing::Span::current().record("leader_id", &append_entries_input.leader_id);
         tracing::Span::current().record("term", &append_entries_input.term);
 
-
+        // TODO: If the value has a "," in it this doesn't work. Fix that
         let values_to_write: Vec<Value> = append_entries_input.entries
             .into_iter()
             .map(|entry| {
@@ -301,9 +372,9 @@ impl RaftInternal for RaftImpl {
 
             futures::future::join_all(peers
                 .into_iter()
-                .map(|(_key, client)| async {
-                    client.unwrap().append_entries(AppendEntriesInput {
-                        leader_id: self.addr.port().into(),
+                .map(|(_key, peer_data)| async {
+                    peer_data.connection.unwrap().append_entries(AppendEntriesInput {
+                        leader_id: self.addr.to_string(),
                         term: 1,
                         entries: log_entries.to_owned()
                     }).await
@@ -320,9 +391,11 @@ impl RaftInternal for RaftImpl {
             .filter(|success| !success)
             .count();
 
+        tracing::info!(failures=failure_count, "Failure count");
+
         let reply = ProposeValueOutput {
             request_id: propose_value_input.request_id,
-            successful: failure_count > 0,
+            successful: failure_count == 0, // TODO: Change this to be based on consensus
         };
 
         Ok(Response::new(reply))

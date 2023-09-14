@@ -47,12 +47,19 @@ message GetValueOutput {
 /** Raft Interactions **/
 
 message AppendEntriesInput {
+    reserved 1;
     // Id of the leader making an AppendEntries request
-    int64 leaderId = 1;
+    string leaderId = 4;
     // Term of the leader making an AppendEntries request
     int64 term = 2;
     // Set of entries attempting to be added
     repeated string entries = 3;
+    // Log index of previous entry
+    int64 prevLogIndex = 5;
+    // Term of the previous log entry
+    int64 prevLogTerm = 6;
+    // Commit index of the current leader
+    int64 leaderCommit = 7;
 }
 
 message AppendEntriesOutput {

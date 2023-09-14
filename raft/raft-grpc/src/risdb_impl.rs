@@ -104,17 +104,18 @@ impl RisDb for RisDbImpl {
 
         let mut client = self.client()?;
 
-        let _response = client.propose_value(ProposeValueInput {
+        let response = client.propose_value(ProposeValueInput {
             request_id: put_request.request_id.clone(),
             values: put_request.values,
         }).await.map_err(|e| {
             tracing::error!(?e, "Failed to put values");
             Status::internal(e.message())
-        })?;
+        })?
+        .into_inner();
 
         let reply = PutResponse {
             request_id: put_request.request_id,
-            success: true,
+            success: response.successful,
         };
 
         tracing::info!("Successfully put values");
