@@ -53,6 +53,7 @@ message LogEntry {
     }
     LogAction logAction = 1;
     shared.Value value = 2;
+    int64 term = 3;
 }
 
 message AppendEntriesInput {
