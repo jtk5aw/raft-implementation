@@ -527,7 +527,7 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Locking state to append entries");
 
-        {
+        let reply = {
             let mut raft_stable_data = self.state.raft_data.lock().await;
             let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
 
@@ -536,7 +536,7 @@ impl RaftInternal for RaftImpl {
 
             tracing::info!("Checking if provided term is accepted");
 
-            let response = if append_entries_input.term < raft_stable_data.current_term {
+            if append_entries_input.term < raft_stable_data.current_term {
                 tracing::warn!("Term provided has already been surpassed. Return failure and current term");
 
                 AppendEntriesOutput {
@@ -549,11 +549,11 @@ impl RaftInternal for RaftImpl {
                     |val| append_entries_input.prev_log_term != val.term,
                     || false
                 ) {
-                tracing::info!("Term of previous log index does not match or does not exist. Return failure and highest prev log term");
+                tracing::info!("Term of previous log index does not match or does not exist. Return failure and prev log term");
 
                 AppendEntriesOutput {
                     success: false,
-                    term: min((raft_stable_data.log.len() - 1) as i64, 0)
+                    term: raft_stable_data.log[raft_stable_data.log.len() - 1].term
                 }
             } else {
                 tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
@@ -564,32 +564,33 @@ impl RaftInternal for RaftImpl {
 
                 self.write_to_logs(append_entries_input.entries).await?;
 
-                // TODO TODO TODO: Start from figuring out what should happen after writing to logs here
-                //  TODO TODO TODO
+                if raft_volatile_data.commit_index < append_entries_input.leader_commit {
+                    tracing::info!("Updating commit index");
+                    raft_volatile_data.commit_index = min(
+                        (raft_stable_data.log.len() - 1) as i64,
+                        append_entries_input.leader_commit
+                    );
+                }
 
-            };
+                tracing::info!("Attempting to update state machine");
+
+                match self.update_state_machine().await {
+                    Ok(_) => {
+                        tracing::info!("Successful updated the state machine");
+                        Ok(AppendEntriesOutput {
+                            success: true,
+                            term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
+                        })
+                    },
+                    Err(err) => {
+                        tracing::error!(err = ?err, "Failed to update the state matching");
+                        Err(Status::internal("Failed to apply provided values".to_owned()))
+                    }
+                }?
+            }
         }
 
-        let values_to_write: Vec<Value> = append_entries_input.entries
-            .into_iter()
-            .map(|entry| entry.value.unwrap())
-            .collect();
-
-        // Write data locally TODO: Abstract this out into a shared method
-        {
-            let mut data = self.data_store.data.lock().await;
-            values_to_write
-                .iter()
-                .for_each(|value| {
-                    data.insert(value.key.to_owned(), value.value.to_owned());
-                });
-        }
-
-
-        let reply = AppendEntriesOutput {
-            success: true,
-            term: append_entries_input.term,
-        };
+        // TODO TODO TODO: Start testing to see if this works at all in the happy case and then start testin failures too
 
         Ok(Response::new(reply))
     }
