@@ -1,11 +1,13 @@
 use std::{collections::HashMap, sync::{Arc}, net::SocketAddr, time::Duration};
 use std::cmp::min;
+use std::ops::{Deref, DerefMut};
 use tokio::sync::Mutex;
 
 use tokio::time::{sleep, timeout};
 use tonic::{transport::Channel, Request, Response, Status};
 
 use crate::{raft_grpc::{raft_internal_client::RaftInternalClient, raft_internal_server::RaftInternal, AppendEntriesOutput, AppendEntriesInput, GetValueInput, GetValueOutput, ProposeValueOutput, ProposeValueInput, PingInput, PingOutput, LogEntry, log_entry::LogAction}, shared::Value};
+use crate::raft_impl::StateMachineError::FailedToWriteToLogs;
 
 // FUTURE NOTE: The mutex here is the tokio::sync mutex on purpose so that the lock can be held across awaits.
 // At the time of writing this was necessary.
@@ -34,7 +36,7 @@ pub enum LeaderError {
 // State Management Structs
 #[derive(Debug)]
 pub struct RaftImpl {
-    // Socker Address of the current server
+    // Socket Address of the current server
     pub addr: SocketAddr,
     // List of paths to other Raft Nodes. Also contains leader state
     pub peer_connections: PeerConnections,
@@ -133,7 +135,7 @@ impl RaftImpl {
      */
     pub fn new(addr: SocketAddr) -> RaftImpl {
         RaftImpl { 
-            addr: addr, 
+            addr,
             peer_connections: PeerConnections {
                 peers: Arc::new(Mutex::new(HashMap::new())) 
             },
@@ -157,15 +159,30 @@ impl RaftImpl {
     }
 
     /**
+     * Adds the provided LogEntry values to own servers logs.
+     */
+    async fn write_to_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        log_entries: Vec<LogEntry>
+    ) {
+        tracing::info!("Writing new value to own log");
+
+        log_entries
+            .iter()
+            .for_each(|log_entry| {
+                stable_data.log.push(log_entry.to_owned());
+            });
+    }
+
+    /**
      * Writes
      */
     pub async fn parse_log_entries(
-        self,
+        &self,
+        raft_stable_data: &RaftStableData,
         input: ProposeValueInput,
     ) -> Result<Vec<LogEntry>, StateMachineError> {
-        tracing::info!("Locking state to parse log entries");
-
-        let raft_stable_data = self.state.raft_data.lock().await;
 
         let log_entries: Vec<LogEntry> = input.values
             .into_iter()
@@ -184,38 +201,33 @@ impl RaftImpl {
     }
 
     /**
-     * Adds the provided LogEntry values to the logs of self and peers.
+     * Adds the provided LogEntry values to the logs of self and peers. Also checks if
+     * data was shared to enough peers to be considered committed.
      *
      * Returns:
      * OK(()): Successfully updated logs for self and a majority of servers overall.
      * Err(String): Failed to update logs of a majority of servers overall.
      */
-    pub async fn write_to_logs(
-        self,
+    pub async fn write_and_share_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        volatile_data: &mut RaftVolatileData,
         log_entries: Vec<LogEntry>
     ) -> Result<(), StateMachineError> {
-
-        tracing::info!("Locking stable and volatile state to add to logs (self and others)");
-
-        let mut raft_stable_data = self.state.raft_data.lock().await;
-        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
 
         tracing::info!("Writing new value to own log");
 
         log_entries
             .iter()
             .for_each(|log_entry| {
-                raft_stable_data.log.push(log_entry.to_owned());
+                stable_data.log.push(log_entry.to_owned());
             });
-
-        let curr_log_index = log_entries.len() as i64;
 
         // TODO: Continue retrying to reach peers that failed
         tracing::info!("Proposing new value to peers");
 
-        let propose_to_peers_result = self.propose_new_entries_to_peers(
-            curr_log_index,
-            raft_volatile_data.commit_index,
+        let propose_to_peers_result = self.share_to_peers(
+            volatile_data.commit_index,
             &log_entries
         ).await;
 
@@ -225,9 +237,15 @@ impl RaftImpl {
             propose_to_peers_result.count_communicated,
             propose_to_peers_result.request_append_entries_results
         ).await {
-            Ok(min_new_commit_index) => raft_volatile_data.commit_index = min_new_commit_index,
-            Err(_) => tracing::error!("Data not committed not enough peers received updates")
-        }
+            Ok(min_new_commit_index) => {
+                volatile_data.commit_index = min_new_commit_index;
+                Ok(())
+            },
+            Err(_) => {
+                tracing::error!("Data not committed not enough peers received updates");
+                Err(FailedToWriteToLogs("Data not committed, not enough peers received updates".to_owned()))
+            }
+        }?;
 
         Ok(())
     }
@@ -238,13 +256,14 @@ impl RaftImpl {
      * ProposeToPeersResult => Object containing both the number of peers that were successfully communicated to
      * and the results of communicating to every peer. Both in successful and unsuccessful cases.
      */
-    async fn propose_new_entries_to_peers(
+    async fn share_to_peers(
         &self,
-        curr_log_index: i64,
         curr_commit_index: i64,
         log_entries: &Vec<LogEntry>
     ) -> ProposeToPeersResult {
-        let mut count_communicated: Arc<Mutex<i64>> = Arc::new(Mutex::new(1)); // Set to 1 to include self
+        let curr_log_index = log_entries.len() as i64;
+
+        let count_communicated: Arc<Mutex<i64>> = Arc::new(Mutex::new(1)); // Set to 1 to include self
         let request_append_entries_results: Vec<Result<i64, LeaderError>> = {
             futures::future::join_all(self.peer_connections.peers.lock().await
                 .iter()
@@ -287,7 +306,7 @@ impl RaftImpl {
                     .filter_map(|result| result.ok())
                     .min()
                     .ok_or_else(|| LeaderError::NoMinimumPeerCommitIndexFound(
-                        "Failed to get minimum peer commit index after successful commincation to the majority".to_owned()
+                        "Failed to get minimum peer commit index after successful communication to the majority".to_owned()
                     ))?
             )
         } else {
@@ -356,20 +375,19 @@ impl RaftImpl {
      *         to the state machine, last_applied will be 1 when the error is returned.
      */
     pub async fn update_state_machine(
-        self, 
+        &self,
+        stable_data: &RaftStableData,
+        volatile_data: &mut RaftVolatileData,
     ) -> Result<(), StateMachineError> {
 
-        let mut volatile_state = self.volatile_state.raft_data.lock().await;
+        while volatile_data.last_applied < volatile_data.commit_index {
 
-        while volatile_state.last_applied < volatile_state.commit_index {
-            let raft_state = self.state.raft_data.lock().await;
-
-            let index_to_apply = volatile_state.last_applied + 1;
-            let log_entry_to_apply = &raft_state.log[index_to_apply as usize];
+            let index_to_apply = volatile_data.last_applied + 1;
+            let log_entry_to_apply = &stable_data.log[index_to_apply as usize];
 
             self.apply_to_state_machine(log_entry_to_apply).await?;
 
-            volatile_state.last_applied += 1;
+            volatile_data.last_applied += 1;
         }
 
         Ok(())
@@ -402,6 +420,51 @@ impl RaftImpl {
             },
             None => {
                 Err(StateMachineError::FailedToApplyLogs("No log action was stored".to_owned()))
+            }
+        }
+    }
+
+    async fn make_update_from_peer(
+        &self,
+        raft_stable_data: &mut RaftStableData,
+        raft_volatile_data: &mut RaftVolatileData,
+        append_entries_input: AppendEntriesInput,
+    ) -> Result<AppendEntriesOutput, StateMachineError> {
+        tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
+
+        raft_stable_data.log.truncate((append_entries_input.prev_log_index + 1) as usize);
+
+        tracing::info!("Appending new entries to the log");
+
+        self.write_to_logs(
+            raft_stable_data,
+            append_entries_input.entries
+        ).await;
+
+        if raft_volatile_data.commit_index < append_entries_input.leader_commit {
+            tracing::info!("Updating commit index");
+            raft_volatile_data.commit_index = min(
+                (raft_stable_data.log.len() - 1) as i64,
+                append_entries_input.leader_commit
+            );
+        }
+
+        tracing::info!("Attempting to update state machine");
+
+        match self.update_state_machine(
+            raft_stable_data,
+            raft_volatile_data
+        ).await {
+            Ok(_) => {
+                tracing::info!("Successful updated the state machine");
+                Ok(AppendEntriesOutput {
+                    success: true,
+                    term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
+                })
+            },
+            Err(err) => {
+                tracing::error!(err = ?err, "Failed to update the state machine");
+                Err(err)
             }
         }
     }
@@ -445,7 +508,7 @@ impl PeerSetup for PeerConnections {
         }
 
         // Return list of errored connections
-        if error_vec.len() > 0 {
+        if !error_vec.is_empty() {
             tracing::error!(?error_vec, "Error vec");
             Err(SetupError::FailedToConnectToPeers(error_vec))
         } else {
@@ -460,7 +523,7 @@ impl PeerSetup for PeerConnections {
         peer_addr: String,
         mut client: RaftInternalClient<Channel>,
     ) -> () {
-        let request = tonic::Request::new(PingInput {
+        let request = Request::new(PingInput {
             requester: addr.port().to_string(), 
         });
     
@@ -488,7 +551,7 @@ impl PeerSetup for PeerConnections {
 // This also  might be an option: https://developer.hashicorp.com/vault/docs/auth/aws
 // TODO: Add redirects to the writer. For now assumes that the outside client will only make put requests to the 
 // writer. Which make not be true
-// TODO: Add suport for other operations when writing to the log.
+// TODO: Add support for other operations when writing to the log.
 #[tonic::async_trait]
 impl RaftInternal for RaftImpl {
     #[tracing::instrument(
@@ -523,76 +586,50 @@ impl RaftInternal for RaftImpl {
 
         let append_entries_input = request.into_inner();
         tracing::Span::current().record("leader_id", &append_entries_input.leader_id);
-        tracing::Span::current().record("term", &append_entries_input.term);
+        tracing::Span::current().record("term", append_entries_input.term);
 
         tracing::info!("Locking state to append entries");
 
-        let reply = {
-            let mut raft_stable_data = self.state.raft_data.lock().await;
-            let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
+        let mut raft_stable_data = self.state.raft_data.lock().await;
+        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
 
-            tracing::info!("Parsing the provided  input into log")
+        tracing::info!("Checking if provided term is accepted");
 
+        if append_entries_input.term < raft_stable_data.current_term {
+            tracing::warn!("Term provided has already been surpassed. Return failure and current term");
 
-            tracing::info!("Checking if provided term is accepted");
+            return Ok(Response::new(AppendEntriesOutput {
+                success: false,
+                term: raft_stable_data.current_term
+            }));
+        };
 
-            if append_entries_input.term < raft_stable_data.current_term {
-                tracing::warn!("Term provided has already been surpassed. Return failure and current term");
+        if raft_stable_data.log.get(append_entries_input.prev_log_index as usize)
+            .map_or_else(
+                || true,
+                |val| append_entries_input.prev_log_term != val.term
+            )
+        {
+            tracing::info!("Term of previous log index does not match or does not exist. Return failure and prev log term");
 
-                AppendEntriesOutput {
-                    success: false,
-                    term: raft_stable_data.current_term
-                }
-            } else if raft_stable_data.log
-                .get(append_entries_input.prev_log_index)
-                .map_or_else(
-                    |val| append_entries_input.prev_log_term != val.term,
-                    || false
-                ) {
-                tracing::info!("Term of previous log index does not match or does not exist. Return failure and prev log term");
+            return Ok(Response::new(AppendEntriesOutput {
+                success: false,
+                term: raft_stable_data.log[raft_stable_data.log.len() - 1].term
+            }))
+        };
 
-                AppendEntriesOutput {
-                    success: false,
-                    term: raft_stable_data.log[raft_stable_data.log.len() - 1].term
-                }
-            } else {
-                tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
-
-                raft_stable_data.log.truncate((append_entries_input.prev_log_index + 1) as usize);
-
-                tracing::info!("Appending new entries to the log");
-
-                self.write_to_logs(append_entries_input.entries).await?;
-
-                if raft_volatile_data.commit_index < append_entries_input.leader_commit {
-                    tracing::info!("Updating commit index");
-                    raft_volatile_data.commit_index = min(
-                        (raft_stable_data.log.len() - 1) as i64,
-                        append_entries_input.leader_commit
-                    );
-                }
-
-                tracing::info!("Attempting to update state machine");
-
-                match self.update_state_machine().await {
-                    Ok(_) => {
-                        tracing::info!("Successful updated the state machine");
-                        Ok(AppendEntriesOutput {
-                            success: true,
-                            term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
-                        })
-                    },
-                    Err(err) => {
-                        tracing::error!(err = ?err, "Failed to update the state matching");
-                        Err(Status::internal("Failed to apply provided values".to_owned()))
-                    }
-                }?
-            }
-        }
+        let output = self.make_update_from_peer(
+            raft_stable_data.deref_mut(),
+            raft_volatile_data.deref_mut(),
+            append_entries_input
+        ).await.map_err(|_|
+            Status::internal("Failed to update the state machine")
+        )?;
 
         // TODO TODO TODO: Start testing to see if this works at all in the happy case and then start testin failures too
+        // MADE a lot of changes while tired so need to amke sure everythign still aligns well with the spec
 
-        Ok(Response::new(reply))
+        return Ok(Response::new(output));
     }
 
     #[tracing::instrument(
@@ -652,9 +689,17 @@ impl RaftInternal for RaftImpl {
         let request_id = propose_value_input.request_id.clone();
         tracing::Span::current().record("request_id", &request_id);
 
+        tracing::info!("Locking state");
+
+        let mut raft_stable_data = self.state.raft_data.lock().await;
+        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
+
         tracing::info!("Converting input data to log entries");
 
-        let log_entries = self.parse_log_entries(propose_value_input).await
+        let log_entries = self.parse_log_entries(
+            raft_stable_data.deref(),
+            propose_value_input
+        ).await
             .map_err(|err| {
                 tracing::error!(err = ?err, "Failed to properly parse logs");
                 Status::internal("Failed to parse provided input".to_owned())
@@ -662,7 +707,11 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Add new values to own logs and to peer logs");
 
-        match self.write_to_logs(log_entries).await {
+        match self.write_and_share_logs(
+            raft_stable_data.deref_mut(),
+            raft_volatile_data.deref_mut(),
+            log_entries
+        ).await {
             Ok(_) => {
                 tracing::info!("Successfully communicated value to majority of peers");
                 Ok(())
@@ -675,9 +724,12 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Applying any necessary changes to the state machine");
 
-        match self.update_state_machine().await {
+        match self.update_state_machine(
+            raft_stable_data.deref(),
+            raft_volatile_data.deref_mut()
+        ).await {
           Ok(_) => {
-              tracing::info!("Successful updated the state maching");
+              tracing::info!("Successful updated the state matching");
               Ok(())
           },
             Err(err) => {
