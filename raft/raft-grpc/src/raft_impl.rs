@@ -134,7 +134,7 @@ impl RaftImpl {
      * Creates a new RaftImpl struct
      */
     pub fn new(addr: SocketAddr) -> RaftImpl {
-        RaftImpl { 
+        RaftImpl {
             addr,
             peer_connections: PeerConnections {
                 peers: Arc::new(Mutex::new(HashMap::new())) 
@@ -176,7 +176,7 @@ impl RaftImpl {
     }
 
     /**
-     * Writes
+     * Parses the propose value input into a set of Log Entries in the successful path.
      */
     pub async fn parse_log_entries(
         &self,
@@ -223,7 +223,7 @@ impl RaftImpl {
                 stable_data.log.push(log_entry.to_owned());
             });
 
-        // TODO: Continue retrying to reach peers that failed
+        // TODO: Continue retrying to reach peers that failed and also handle decrementing log entry and retrying for log inconsistencies
         tracing::info!("Proposing new value to peers");
 
         let propose_to_peers_result = self.share_to_peers(
@@ -251,7 +251,7 @@ impl RaftImpl {
     }
 
     /**
-     * Makes requests to all peers and tracks how many succeed.
+     * Makes requests to all peers and track how many succeed.
      *
      * ProposeToPeersResult => Object containing both the number of peers that were successfully communicated to
      * and the results of communicating to every peer. Both in successful and unsuccessful cases.
@@ -261,17 +261,16 @@ impl RaftImpl {
         curr_commit_index: i64,
         log_entries: &Vec<LogEntry>
     ) -> ProposeToPeersResult {
-        let curr_log_index = log_entries.len() as i64;
 
         let count_communicated: Arc<Mutex<i64>> = Arc::new(Mutex::new(1)); // Set to 1 to include self
         let request_append_entries_results: Vec<Result<i64, LeaderError>> = {
             futures::future::join_all(self.peer_connections.peers.lock().await
-                .iter()
+                .deref_mut()
+                .iter_mut()
                 .map(|(peer_addr, peer_data)| self.request_append_entries_peer(
                     count_communicated.clone(),
                     peer_addr.to_owned(),
-                    peer_data.to_owned(),
-                    curr_log_index,
+                    peer_data,
                     curr_commit_index,
                     log_entries
                 ))
@@ -327,35 +326,52 @@ impl RaftImpl {
         &self,
         count_communicated: Arc<Mutex<i64>>,
         peer_addr: String,
-        peer_data: PeerData,
-        curr_log_index: i64,
+        peer_data: &mut PeerData,
         curr_commit_index: i64,
         log_entries: &Vec<LogEntry>,
-    ) -> Result<i64, LeaderError>{
-        let mut peer_leader_state = peer_data.leader_state
+    ) -> Result<i64, LeaderError> {
+        let peer_leader_state = peer_data.leader_state
+            .as_mut()
+            .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
+
+        let peer_leader_connection = peer_data.connection
+            .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
         
         // Make request to append entries TODO: Play with the timeout time here
-        match timeout(Duration::from_secs(5), peer_data.connection.unwrap().append_entries(AppendEntriesInput {
+        let request_result = match timeout(Duration::from_secs(5), peer_leader_connection.append_entries(AppendEntriesInput {
             leader_id: self.addr.to_string(),
             term: 0, // TODO: Actually handle different terms
             entries: log_entries.to_owned(),
-            prev_log_index: (curr_log_index - 1),
+            prev_log_index: (peer_leader_state.next_index - 1),
             prev_log_term: 0, // TODO: Actually handle different terms
             leader_commit: curr_commit_index,
         })).await {
-            Ok(_) => {
-                tracing::info!(?peer_addr, "Successfully appended entries to peer");
-                // TODO; Handle getting a different term in response and also different index (i.e its behind). May need to make re requests in some cases
-                peer_leader_state.next_index = curr_log_index + 1;
-                peer_leader_state.match_index = curr_log_index;
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(?e, ?peer_addr, "Call to peer timed out");
+                Err(LeaderError::FailedToAppendEntries(peer_addr.to_owned()))?
+            }
+        };
 
-                if peer_leader_state.match_index >= curr_log_index {
-                    tracing::info!("Peer now has a match index where all new logs are applied. Updated count of peers communicated to");
-                    *count_communicated.lock().await += 1;
+        match request_result {
+            Ok(res) => {
+                let append_entries_output = res.into_inner();
+
+                if append_entries_output.success {
+                    tracing::info!(?peer_addr, "Successfully appended entries to peer");
+
+                    peer_leader_state.next_index += log_entries.len() as i64;
+                    peer_leader_state.match_index += log_entries.len() as i64;
+
+                    if peer_leader_state.match_index >= curr_commit_index {
+                        tracing::info!("Peer now has a match index where all new logs are applied. Updated count of peers communicated to");
+                        *count_communicated.lock().await += 1;
+                    }
+                    Ok(peer_leader_state.match_index)
+                } else {
+                    todo!("Handle this case where the peer responded but with success set as false. means need to retry based on term provided back");
                 }
-
-                Ok(peer_leader_state.match_index)
             },
             Err(e) => {
                 tracing::error!(?e, ?peer_addr, "Failed to append entries to peer");
@@ -378,19 +394,23 @@ impl RaftImpl {
         &self,
         stable_data: &RaftStableData,
         volatile_data: &mut RaftVolatileData,
-    ) -> Result<(), StateMachineError> {
+    ) -> Result<i64, StateMachineError> {
+
+        let mut num_updates = 0;
 
         while volatile_data.last_applied < volatile_data.commit_index {
 
             let index_to_apply = volatile_data.last_applied + 1;
+
             let log_entry_to_apply = &stable_data.log[index_to_apply as usize];
 
             self.apply_to_state_machine(log_entry_to_apply).await?;
 
             volatile_data.last_applied += 1;
+            num_updates += 1;
         }
 
-        Ok(())
+        Ok(num_updates)
     }
 
     /**
@@ -417,6 +437,10 @@ impl RaftImpl {
             },
             Some(LogAction::Delete) => {
                 todo!("Delete functionality is not yet implemented")
+            },
+            Some(LogAction::Noop) => {
+                // do nothing
+                Ok(())
             },
             None => {
                 Err(StateMachineError::FailedToApplyLogs("No log action was stored".to_owned()))
@@ -455,8 +479,8 @@ impl RaftImpl {
             raft_stable_data,
             raft_volatile_data
         ).await {
-            Ok(_) => {
-                tracing::info!("Successful updated the state machine");
+            Ok(num_updates) => {
+                tracing::info!(?num_updates, "Successful updated the state machine");
                 Ok(AppendEntriesOutput {
                     success: true,
                     term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
@@ -604,12 +628,14 @@ impl RaftInternal for RaftImpl {
             }));
         };
 
-        if raft_stable_data.log.get(append_entries_input.prev_log_index as usize)
+        // As a base case, if the previous term is the first log entry is matches
+        let prev_term_matches = append_entries_input.prev_log_index == 0 || raft_stable_data.log.get(append_entries_input.prev_log_index as usize)
             .map_or_else(
                 || true,
-                |val| append_entries_input.prev_log_term != val.term
-            )
-        {
+                |val| append_entries_input.prev_log_term == val.term
+            );
+
+        if !prev_term_matches {
             tracing::info!("Term of previous log index does not match or does not exist. Return failure and prev log term");
 
             return Ok(Response::new(AppendEntriesOutput {
@@ -626,8 +652,12 @@ impl RaftInternal for RaftImpl {
             Status::internal("Failed to update the state machine")
         )?;
 
-        // TODO TODO TODO: Start testing to see if this works at all in the happy case and then start testin failures too
-        // MADE a lot of changes while tired so need to amke sure everythign still aligns well with the spec
+        // TODO TODO TODO: Start testing to see if this works at all in the happy case and then start testing failures too
+        // MADE a lot of changes while tired so need to amke sure everything still aligns well with the spec
+
+        // TODO TODO TODO: Clean this up and split into multiple files. Maybe split follower and leader state and then have a shared class?
+        //  Also start writing unit tests. Will make coming back to this way easier. Honestly probably possible to have unit tests
+        //  spin up a few local servers and then just call each other to test the logic.
 
         return Ok(Response::new(output));
     }
@@ -728,8 +758,8 @@ impl RaftInternal for RaftImpl {
             raft_stable_data.deref(),
             raft_volatile_data.deref_mut()
         ).await {
-          Ok(_) => {
-              tracing::info!("Successful updated the state matching");
+          Ok(num_updates) => {
+              tracing::info!(?num_updates, "Successful updated the state matchine");
               Ok(())
           },
             Err(err) => {

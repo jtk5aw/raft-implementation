@@ -4,7 +4,9 @@ use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
 
 use crate::{raft_impl::{SetupError, RaftImpl, PeerSetup}, risdb_impl::{RisDbImpl, RisDbSetupError}, raft_grpc::raft_internal_server::RaftInternalServer, risdb::ris_db_server::RisDbServer};
- 
+use crate::raft_grpc::log_entry::LogAction;
+use crate::raft_grpc::LogEntry;
+
 // Errors
 pub enum StartUpError {
     FailedToSetup(SetupError),
@@ -89,6 +91,14 @@ impl RisDbSetup for RisDb {
 
         let raft = RaftImpl::new(addr);
         let risdb = RisDbImpl::new(addr);
+
+        // Add a dummy value to the start of the log that should NEVER actually be applied. But starting from
+        // 0 causes problems cause last applied and commit index also start at 0
+        raft.state.raft_data.lock().await.log.push(LogEntry {
+            log_action: LogAction::Noop.into(),
+            value: None,
+            term: -1
+        });
 
         let peer_connections = raft.peer_connections.clone();
         let loopback_raft_client = risdb.raft_client.clone();

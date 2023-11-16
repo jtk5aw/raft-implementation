@@ -50,6 +50,7 @@ message LogEntry {
     enum LogAction {
         PUT = 0;
         DELETE = 1;
+        NOOP = 2;
     }
     LogAction logAction = 1;
     shared.Value value = 2;
