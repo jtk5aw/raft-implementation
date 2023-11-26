@@ -3,9 +3,13 @@ use std::net::SocketAddr;
 use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
 
-use crate::{raft_impl::{SetupError, RaftImpl, PeerSetup}, risdb_impl::{RisDbImpl, RisDbSetupError}, raft_grpc::raft_internal_server::RaftInternalServer, risdb::ris_db_server::RisDbServer};
+use crate::raft::node::RaftImpl;
+use crate::raft::peer::{PeerSetup, SetupError};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::LogEntry;
+use crate::raft_grpc::raft_internal_server::RaftInternalServer;
+use crate::risdb::ris_db_server::RisDbServer;
+use crate::risdb_impl::{RisDbImpl, RisDbSetupError};
 
 // Errors
 pub enum StartUpError {
@@ -48,7 +52,7 @@ pub struct RisDb {}
 
 // Public traits
 #[tonic::async_trait]
-pub trait RisDbSetup  {
+pub trait RisDbSetup {
     /**
      * Starts up this raft server and connects it to all of its peers. 
      * 

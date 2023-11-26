@@ -1,6 +1,6 @@
-mod raft_impl;
 mod risdb_impl;
 pub mod server;
+mod raft;
 
 pub mod raft_grpc {
     tonic::include_proto!("raftgrpc");
