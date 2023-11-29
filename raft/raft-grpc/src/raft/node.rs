@@ -245,11 +245,7 @@ impl RaftInternal for RaftImpl {
             Status::internal("Failed to update the state machine")
         )?;
 
-        // TODO TODO TODO: Start testing to see if this works at all in the happy case and then start testing failures too
-        // MADE a lot of changes while tired so need to amke sure everything still aligns well with the spec
-
-        // TODO TODO TODO: Clean this up and split into multiple files. Maybe split follower and leader state and then have a shared class?
-        //  Also start writing unit tests. Will make coming back to this way easier. Honestly probably possible to have unit tests
+        // TODO TODO TODO: Also start writing unit tests. Will make coming back to this way easier. Honestly probably possible to have unit tests
         //  spin up a few local servers and then just call each other to test the logic.
 
         return Ok(Response::new(output));
