@@ -1,15 +1,19 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::{self, sleep};
 use tonic::{Request, Response, Status};
+use crate::raft;
 use crate::raft::data_store::{DataStore, StateMachine};
 use crate::raft::follower::FollowerActions;
 use crate::raft::leader::LeaderActions;
 use crate::raft::peer::PeerConnections;
 use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState};
-use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput};
+use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
 use crate::shared::Value;
@@ -19,6 +23,17 @@ use crate::shared::Value;
 pub enum StateMachineError {
     FailedToWriteToLogs(String),
     FailedToApplyLogs(String),
+}
+
+#[derive(Debug)]
+pub enum HeartbeatError {
+    CustomError(String),
+}
+
+impl From<String> for HeartbeatError {
+    fn from(err: String) -> HeartbeatError {
+        HeartbeatError::CustomError(err)
+    }
 }
 
 #[derive(Debug)]
@@ -63,6 +78,32 @@ impl RaftImpl {
             }
         }
     }
+
+    pub async fn heartbeat(
+        peer_connections: PeerConnections,
+        raft_stable_state: RaftStableState,
+    ) -> Result<(), HeartbeatError> {
+
+        loop {
+            sleep(Duration::from_millis(500)).await;
+
+            if peer_connections.peers.lock().await.is_empty() {
+                tracing::info!("No peers connected");
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+
+            // Lock just to prevent this from happenign concurrently with an update for now
+            // TODO: Make it so that this just proposes an empty value for a leader and checks
+            //  for a contact from the leader for followers. Probably need to add some sort of flag
+            let _raft_stable_data = raft_stable_state.raft_data.lock().await;
+
+            tracing::info!("Sending heartbeat");
+        }
+
+        Ok(())
+    }
+
 }
 
 // TODO: ADD AUTH TO THESE CALLS SO THAT IT CAN BE PUBLICLY EXPOSED WITHOUT ISSUE
@@ -191,6 +232,66 @@ impl RaftInternal for RaftImpl {
 
     #[tracing::instrument(
         skip_all,
+        name = "Raft:request_vote",
+        fields(candidate_id, requested_term),
+        ret,
+        err
+    )]
+    async fn request_vote(
+        &self,
+        request: Request<RequestVoteInput>,
+    ) -> Result<Response<RequestVoteOutput>, Status> {
+        let request_vote_input = request.into_inner();
+        tracing::Span::current().record("candidate_id", &request_vote_input.candidate_id);
+        tracing::Span::current().record("requested_term", &request_vote_input.term);
+
+        let raft_stable_state = self.state.raft_data.lock().await;
+
+        // Candidate is requesting votes on an old term. Vote no
+        if raft_stable_state.current_term > request_vote_input.term {
+            return Ok(Response::new(
+                RequestVoteOutput {
+                    term: raft_stable_state.current_term,
+                    vote_granted: false
+                }
+            ));
+        }
+
+        // Already voted for another candidate. Vote no
+        if raft_stable_state.voted_for.as_ref().is_some_and(|voted| voted != &request_vote_input.candidate_id) {
+            return Ok(Response::new(
+                RequestVoteOutput {
+                    term: raft_stable_state.current_term,
+                    vote_granted: false
+                }
+            ));
+        }
+
+        // Candidate has out of date logs. Vote no
+        if !candidate_more_up_to_date(&raft_stable_state, &request_vote_input) {
+            return Ok(Response::new(
+                RequestVoteOutput {
+                    term: raft_stable_state.current_term,
+                    vote_granted: false
+                }
+            ));
+        }
+
+        // TODO TODO TODO: Actually test sending request votes to each other and create a heartbeat thread
+        //  on server start up that can be interrupted and restarted
+
+        // Candidate has a recent enough term and is more up to date than the current node. Vote yes
+        let mut raft_stable_state = raft_stable_state;
+        raft_stable_state.voted_for = Some(request_vote_input.candidate_id);
+
+        Ok(Response::new(RequestVoteOutput {
+            term: request_vote_input.term, // TODO: Determine if this is the term that should be returned in the case where vote is granted
+            vote_granted: true,
+        }))
+    }
+
+    #[tracing::instrument(
+        skip_all,
         name = "Raft:append_entries",
         fields(leader_id, term),
         ret,
@@ -290,4 +391,45 @@ async fn parse_log_entries(
     tracing::info!("Successfully wrote to logs");
 
     Ok(log_entries)
+}
+
+/**
+ * Takes the current raft stable state and a request vote input and determines if
+ * the request or current node have more up to date logs.
+ *
+ * Taken directly from the Raft paper
+ * > "Raft determines which of two logs is more up-to-date
+ * by comparing the index and term of the last entries in the
+ * logs. If the logs have last entries with different terms, then
+ * the log with the later term is more up-to-date. If the logs
+ * end with the same term, then whichever log is longer is
+ * more up-to-date"
+ *
+ * Result:
+ * true -> Peer is more up to date
+ * false -> Current node is more up to date
+ */
+fn candidate_more_up_to_date(
+    raft_stable_state: &RaftStableData,
+    input: &RequestVoteInput
+) -> bool {
+    // WARNING: Right now there is logic to always inject at least one Noop log entry to the log in the beginning
+    // if this changes this will cause panics
+    let last_log_term = raft_stable_state.log.last().unwrap().term;
+    let candidate_last_log_term = input.last_log_term;
+
+    match candidate_last_log_term.cmp(&last_log_term) {
+        Ordering::Less => false,
+        Ordering::Greater => true,
+        Ordering::Equal => {
+            let last_log_index = (raft_stable_state.log.len() - 1) as i64;
+            let candidate_last_log_index = input.last_log_index;
+
+            if candidate_last_log_index > last_log_index {
+                return true;
+            }
+
+            return false;
+        }
+    }
 }

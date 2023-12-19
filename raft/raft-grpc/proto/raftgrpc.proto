@@ -10,6 +10,7 @@ service RaftInternal {
     rpc ProposeValue (ProposeValueInput) returns (ProposeValueOutput);
     rpc GetValue (GetValueInput) returns (GetValueOutput);
 
+    rpc RequestVote (RequestVoteInput) returns (RequestVoteOutput);
     rpc AppendEntries (AppendEntriesInput) returns (AppendEntriesOutput);
     rpc Ping (PingInput) returns (PingOutput);
 }
@@ -45,6 +46,24 @@ message GetValueOutput {
 }
 
 /** Raft Interactions **/
+
+message RequestVoteInput {
+    // Term of the candidate requesting votes
+    int64 term = 1;
+    // ID of the candidate requesting votes
+    string candidateId = 2;
+    // Index of the candidates last log entry
+    int64 lastLogIndex = 3;
+    // Term of the candidates last log entry
+    int64 lastLogTerm = 4;
+}
+
+message RequestVoteOutput {
+    // currentTerm for the node returning its vote
+    int64 term = 1;
+    // True if voted "yes", False if voted "no"
+    bool voteGranted = 2;
+}
 
 message LogEntry {
     enum LogAction {

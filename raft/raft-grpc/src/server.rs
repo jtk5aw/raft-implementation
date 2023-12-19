@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
 
-use crate::raft::node::RaftImpl;
+use crate::raft::node::{RaftImpl, HeartbeatError};
 use crate::raft::peer::{PeerSetup, SetupError};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::LogEntry;
@@ -16,6 +16,7 @@ pub enum StartUpError {
     FailedToSetup(SetupError),
     FailedToStartServer(tonic::transport::Error),
     FailedToLocallyConnect(RisDbSetupError),
+    FailedToHeartbeat(HeartbeatError),
     CustomError(String),
 }
 
@@ -37,6 +38,11 @@ impl From<RisDbSetupError> for StartUpError {
     }
 }
 
+impl From<HeartbeatError> for StartUpError {
+    fn from(err: HeartbeatError) -> StartUpError {
+        StartUpError::FailedToHeartbeat(err)
+    }
+}
 
 impl From<String> for StartUpError {
     fn from(err: String) -> StartUpError {
@@ -82,6 +88,7 @@ pub trait RisDbSetup {
         raft: RaftImpl,
         risdb: RisDbImpl,
     ) -> Result<(), StartUpError>;
+
 }
 
 #[tonic::async_trait]
@@ -107,12 +114,23 @@ impl RisDbSetup for RisDb {
         let peer_connections = raft.peer_connections.clone();
         let loopback_raft_client = risdb.raft_client.clone();
 
+        let heartbeat_peer_connections = raft.peer_connections.clone();
+        let heartbeat_raft_state = raft.state.clone();
+
+        // TODO TOD TODO: make a background heartbeat thread work using hte loopback raft client
+        // that somehow makes requests to the raft server and does the proper heartbeat. 
+        // Either by sending out request votes if its a candidate who hasn't received a heartbeat
+        // or just by doing the heartbeating
+
         // Starts the server and a "setup" thread to run simultaneously. 
         // NOTE: Task are spawned manually so that an error can have ::from() called to map to 
         // a StartUpError.
         // TODO: Clean this up or abstract it into its own function
         let serve_wrapper_handle = tokio::spawn(
             self.serve_wrapper(raft, risdb)
+        );
+        let heartbeat_handle = tokio::spawn(
+            RaftImpl::heartbeat(heartbeat_peer_connections, heartbeat_raft_state)
         );
         let peer_connections_handle = tokio::spawn(
             peer_connections.connect_to_peers(addr, peers)
@@ -123,6 +141,7 @@ impl RisDbSetup for RisDb {
 
         let result = try_join!(
             flatten(serve_wrapper_handle),
+            flatten(heartbeat_handle),
             flatten(peer_connections_handle),
             flatten(loopback_connect_handle)
         );
@@ -137,7 +156,10 @@ impl RisDbSetup for RisDb {
                 },
                 StartUpError::FailedToLocallyConnect(err) => {
                     tracing::error!("Failed to connect to the local raft server: {:?}", err);
-                }
+                },
+                StartUpError::FailedToHeartbeat(err) => {
+                    tracing::error!("Failed to heartbeat: {:?}", err);
+                },
                 StartUpError::CustomError(err) => {
                     tracing::error!("Most likely a concurrency issue: {:?}", err);
                 }
