@@ -4,15 +4,17 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
+use rand::Rng;
 use tokio::sync::Mutex;
-use tokio::time::{self, sleep};
+use tokio::time::{self, sleep, MissedTickBehavior, interval};
 use tonic::{Request, Response, Status};
 use crate::raft;
 use crate::raft::data_store::{DataStore, StateMachine};
 use crate::raft::follower::FollowerActions;
 use crate::raft::leader::LeaderActions;
-use crate::raft::peer::PeerConnections;
-use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState};
+use crate::raft::peer::{PeerConnections, PeerSetup};
+use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState, RaftNodeType};
+use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
@@ -34,6 +36,11 @@ impl From<String> for HeartbeatError {
     fn from(err: String) -> HeartbeatError {
         HeartbeatError::CustomError(err)
     }
+}
+
+#[derive(Debug)]
+pub enum SetupError {
+    FailedToConnectToPeers(Vec<String>),
 }
 
 #[derive(Debug)]
@@ -62,6 +69,7 @@ impl RaftImpl {
             },
             state: RaftStableState {
                 raft_data: Arc::new(Mutex::new(RaftStableData {
+                    node_type: RaftNodeType::StartingUp,
                     current_term: 0,
                     voted_for: None,
                     log: Vec::new(),
@@ -79,29 +87,113 @@ impl RaftImpl {
         }
     }
 
+    /**
+     * Function used to heartbeat on this node. Behavior of the heartbeat is
+     * different depending on the RaftNodeType of th enode.
+     *
+     * `Result`
+     * `Ok(())` - Stopped heartbeating
+     * `Error(HeartbeatError)` - Failed to complete heartbeat for some reason.
+     */
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     pub async fn heartbeat(
         peer_connections: PeerConnections,
         raft_stable_state: RaftStableState,
     ) -> Result<(), HeartbeatError> {
+        // Won't do a bunch of ticks at once to "catch up"
+        let mut interval = interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            sleep(Duration::from_millis(500)).await;
+            interval.tick().await;
+            let node_type = {
+                raft_stable_state.raft_data.lock().await.node_type.clone()
+                // Done in brackets to get node type but not keep holding the lock.
+                // because if its a Follower its going to sleep
+            };
 
-            if peer_connections.peers.lock().await.is_empty() {
-                tracing::info!("No peers connected");
-                sleep(Duration::from_secs(5)).await;
-                continue;
+            match node_type {
+                RaftNodeType::StartingUp => {
+                    tracing::info!("Not all peers connected");
+                    sleep(Duration::from_secs(5)).await;
+                },
+                RaftNodeType::Follower(pinged) => {
+                    if pinged {
+                        continue;
+                    }
+
+                    // Add Jitter
+                    let random = {
+                        let mut rng = rand::thread_rng();
+                        rng.gen_range(0..100)
+                    };
+                    sleep(Duration::from_millis(random)).await;
+
+                    let _raft_stable_state = raft_stable_state.raft_data.lock().await;
+
+                    tracing::info!("Waiting for heartbeat: {:?}", pinged);
+                },
+                _ => {
+                    todo!("Haven't implemented heartbeat for other Node Types yet");
+                }
             }
-
-            // Lock just to prevent this from happenign concurrently with an update for now
-            // TODO: Make it so that this just proposes an empty value for a leader and checks
-            //  for a contact from the leader for followers. Probably need to add some sort of flag
-            let _raft_stable_data = raft_stable_state.raft_data.lock().await;
-
-            tracing::info!("Sending heartbeat");
         }
 
         Ok(())
+    }
+
+    /**
+     * Function used to connect to a set of peers.
+     *
+     * `Result`
+     * `Ok(())` - Connected to all peers
+     * `Error(Vec<String>)` - Failed to connect to all peers. Returns list of failures
+     */
+    #[tracing::instrument(skip_all, ret, err(Debug))]
+    pub async fn connect_to_peers(
+        addr: SocketAddr,
+        peers: Vec<String>,
+        peer_connections: PeerConnections,
+        raft_stable_state: RaftStableState
+    ) -> Result<(), SetupError> {
+
+        // Create vector of potential failed connections
+        let mut error_vec: Vec<String> = Vec::new();
+
+        tracing::info!("Waiting for peers to start...");
+
+        sleep(Duration::from_secs(5)).await;
+
+        // Attempt to create all connections
+        for peer_port in peers {
+            let peer_addr = format!("https://[::1]:{}", peer_port);
+
+            let result = RaftInternalClient::connect(
+                peer_addr.to_owned()
+            ).await;
+
+            match result {
+                Ok(client) => peer_connections.handle_client_connection(
+                    addr, peer_addr, client
+                ).await,
+                Err(err) => {
+                    tracing::error!(%err, "Error connecting to peer");
+                    error_vec.push(peer_port);
+                }
+            }
+        }
+
+        // Return list of errored connections
+        if !error_vec.is_empty() {
+            tracing::error!(?error_vec, "Error vec");
+            Err(SetupError::FailedToConnectToPeers(error_vec))
+        } else {
+            // Convert to follower
+            let mut raft_stable_data = raft_stable_state.raft_data.lock().await;
+            raft_stable_data.node_type = RaftNodeType::Follower(false);
+
+            Ok(())
+        }
     }
 
 }

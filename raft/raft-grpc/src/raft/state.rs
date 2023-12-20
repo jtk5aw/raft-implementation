@@ -7,8 +7,17 @@ pub struct RaftStableState {
     pub raft_data: Arc<Mutex<RaftStableData>>,
 }
 
+#[derive(Debug, Clone)]
+pub enum RaftNodeType {
+    Follower(bool),
+    Candidate,
+    Leader,
+    StartingUp,
+}
+
 #[derive(Debug)]
 pub struct RaftStableData {
+    pub node_type: RaftNodeType,
     pub current_term: i64,
     pub voted_for: Option<String>,
     pub log: Vec<LogEntry>,

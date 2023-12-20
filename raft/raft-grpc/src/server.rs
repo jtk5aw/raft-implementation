@@ -3,8 +3,7 @@ use std::net::SocketAddr;
 use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
 
-use crate::raft::node::{RaftImpl, HeartbeatError};
-use crate::raft::peer::{PeerSetup, SetupError};
+use crate::raft::node::{RaftImpl, HeartbeatError, SetupError};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::LogEntry;
 use crate::raft_grpc::raft_internal_server::RaftInternalServer;
@@ -111,37 +110,48 @@ impl RisDbSetup for RisDb {
             term: -1
         });
 
-        let peer_connections = raft.peer_connections.clone();
-        let loopback_raft_client = risdb.raft_client.clone();
-
         let heartbeat_peer_connections = raft.peer_connections.clone();
         let heartbeat_raft_state = raft.state.clone();
 
-        // TODO TOD TODO: make a background heartbeat thread work using hte loopback raft client
-        // that somehow makes requests to the raft server and does the proper heartbeat. 
-        // Either by sending out request votes if its a candidate who hasn't received a heartbeat
-        // or just by doing the heartbeating
+        let connect_to_peers_peer_connections = raft.peer_connections.clone();
+        let connect_to_peers_raft_stable_state = raft.state.clone();
+
+        let loopback_raft_client = risdb.raft_client.clone();
 
         // Starts the server and a "setup" thread to run simultaneously. 
         // NOTE: Task are spawned manually so that an error can have ::from() called to map to 
         // a StartUpError.
         // TODO: Clean this up or abstract it into its own function
         let serve_wrapper_handle = tokio::spawn(
-            self.serve_wrapper(raft, risdb)
+            self.serve_wrapper(
+                raft,
+                risdb
+            )
         );
         let heartbeat_handle = tokio::spawn(
-            RaftImpl::heartbeat(heartbeat_peer_connections, heartbeat_raft_state)
+            RaftImpl::heartbeat(
+                heartbeat_peer_connections,
+                heartbeat_raft_state
+            )
         );
         let peer_connections_handle = tokio::spawn(
-            peer_connections.connect_to_peers(addr, peers)
+            RaftImpl::connect_to_peers(addr,
+                peers,
+                connect_to_peers_peer_connections,
+                connect_to_peers_raft_stable_state
+            )
         );
         let loopback_connect_handle = tokio::spawn(
-            loopback_raft_client.init_client(addr)
+            loopback_raft_client.init_client(
+                addr
+            )
         );
 
         let result = try_join!(
+            // Should never return while the server is live
             flatten(serve_wrapper_handle),
             flatten(heartbeat_handle),
+            // Should return relatively quickly after some setup occurs
             flatten(peer_connections_handle),
             flatten(loopback_connect_handle)
         );
