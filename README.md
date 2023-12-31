@@ -1,18 +1,10 @@
 # raft-implementation
 Working on implementing raft
 
-## Personal Notes
+So far I have what I would consider a "first draft" impl written. It "works". 
 
-* Routing to the right leader node. If a client makes a request to write and it goes to a follower node
-they need to be re-directed somehow to the leader node. I want to put my Fargate tasks in private subnets so I'm not 100% sure how to do this. 
-    * ~Seems like the client code has to be relatively involved to support things like this.~ 
-    * Actually I think the best plan of action is as follows: 
-        * Have all the fargate tasks running in a private subnet. 
-        * Create an ALB with two target groups: 
-            * 1 target group points just to the leader
-            * 1 target group points to all the nodes
-        * Have URL based routing that will route write requests to the leader target group and everything else to the other target group. 
-        * Every time that a new leader is determine just need to update this ALB
-    * ~Using ALB scares me cause it can get pretty expensive. I'll just have to set alarms if it starts getting crazy traffic. Or just set it up for tests and then tear it down after~. 
-        * ~I'm probably overthinking this and will just have to come back to this when I'm more awake~
-        * New olan elimates this fear 
+And what I mean by that is that I can start up 3 nodes manually (on one machine using localhost for all of them) and they will be able to elect a leader and then replicate values. I can also crash the leader and the two remaining nodes will keep going. Bringing the original node back online is a little murky. Doesn't really work, it crashes often and it will never get new logs either. 
+
+Continuing to work on it but I'm happy with the progress so far. Beyond just making it work over local host as Raft is inteded to (i.e makingit so bringing the server back online works without issue, servers catch back up, etc) my plans are to eventually make it so they communicate over an actual network and not just all run on the same machine. Theoretically that should work now but I haven't fully tested it yet. The idea is to do this using EC2 instances that I just spin up and down and can crash the server code manually for some testing to take place. I also plan to make it so that they write to disk rather than just using memory. 
+
+A long shot goal is some form of testing to be added so I can "verify" that this works. Unsure if I'll get there though but I would at least like to do the other steps. 
