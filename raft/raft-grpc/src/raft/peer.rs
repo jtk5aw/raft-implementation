@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use tonic::Request;
 use tonic::transport::Channel;
 use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::raft_internal_client::RaftInternalClient;
-use crate::raft::state::{RaftStableData, RaftVolatileData};
+use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
 
 // Errors
 #[derive(Debug)]
@@ -18,6 +19,7 @@ pub enum LeaderError {
     NoMinimumPeerCommitIndexFound(String),
     NotEnoughPeersUpdated(String),
     FailedToAppendEntries(String),
+    ConvertToFollower(i64), // Higher term seen
 }
 
 #[derive(Debug)]
@@ -134,7 +136,8 @@ pub trait LeaderActions {
     /**
      * Makes requests to all peers and track how many succeed.
      *
-     * ProposeToPeersResult => Object containing both the number of peers that were successfully communicated to
+     * Returns: 
+     * ProposeToPeersResult: Object containing both the number of peers that were successfully communicated to
      * and the results of communicating to every peer. Both in successful and unsuccessful cases.
      */
     async fn share_to_peers(
@@ -207,6 +210,29 @@ impl LeaderActions for PeerConnections {
             &log_entries
         ).await;
 
+        let convert_to_follower: Vec<&Result<i64, LeaderError>> = propose_to_peers_result.request_append_entries_results
+            .iter()
+            .filter(|result| match result {
+                Err(LeaderError::ConvertToFollower(_)) => true,
+                _ => false
+            })
+            .collect();
+
+        if convert_to_follower.len() > 0 {
+            tracing::info!("Node should be converted to a follower. Complete converstion now");
+            stable_data.current_term = convert_to_follower
+                .iter()
+                .map(|result| match result {
+                    Err(LeaderError::ConvertToFollower(term)) => term.to_owned(),
+                    _ => -10 // This should never happen so it is made an arbitrarily small number
+                })
+                .max()
+                .unwrap_or_else(|| stable_data.current_term);
+            stable_data.node_type = RaftNodeType::Follower(false);
+            tracing::info!(stable_data.current_term, "The term after conversion");
+            return Ok(());
+        }
+
         tracing::info!(?propose_to_peers_result, "Calculate the new commit index");
 
         match self.calculate_new_commit_index(
@@ -215,13 +241,12 @@ impl LeaderActions for PeerConnections {
         ).await {
             Ok(min_new_commit_index) => {
                 volatile_data.commit_index = min_new_commit_index;
-                Ok(())
             },
             Err(_) => {
                 tracing::error!("Data not committed not enough peers received updates");
-                Err(StateMachineError::FailedToWriteToLogs("Data not committed, not enough peers received updates".to_owned()))
+                Err(StateMachineError::FailedToWriteToLogs("Data not committed, not enough peers received updates".to_owned()))?
             }
-        }?;
+        }
 
         Ok(())
     }
@@ -329,8 +354,11 @@ impl LeaderActions for PeerConnections {
                         *count_communicated.lock().await += 1;
                     }
                     Ok(peer_leader_state.match_index)
+                } else if !append_entries_output.success && append_entries_output.term > raft_stable_data.current_term {
+                    tracing::info!(?peer_addr, "Peer's term is greater than this node's. Converting to follower");
+                    Err(LeaderError::ConvertToFollower(append_entries_output.term))
                 } else {
-                    todo!("Handle this case where the peer responded but with success set as false. means need to retry based on term provided back");
+                    todo!("Peer returned append_entries success of false but has a lower term. I don't know if this can happen? For now just panic");
                 }
             },
             Err(e) => {

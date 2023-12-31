@@ -532,6 +532,7 @@ impl RaftInternal for RaftImpl {
         // Candidate has a recent enough term and is more up to date than the current node. Vote yes
         let mut raft_stable_state = raft_stable_state;
         raft_stable_state.voted_for = Some(request_vote_input.candidate_id);
+        raft_stable_state.current_term = request_vote_input.term;
         raft_stable_state.node_type = RaftNodeType::Follower(true);
 
         Ok(Response::new(RequestVoteOutput {
@@ -603,9 +604,6 @@ impl RaftInternal for RaftImpl {
         ).await.map_err(|_|
             Status::internal("Failed to update the state machine")
         )?;
-
-        // TODO TODO TODO: Also start writing unit tests. Will make coming back to this way easier. Honestly probably possible to have unit tests
-        //  spin up a few local servers and then just call each other to test the logic.
 
         return Ok(Response::new(output));
     }

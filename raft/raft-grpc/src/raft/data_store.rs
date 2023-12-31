@@ -59,8 +59,6 @@ impl StateMachine for RaftImpl {
 
             let index_to_apply = volatile_data.last_applied + 1;
 
-            tracing::info!(?stable_data.log, "DEBUG DEBUG DEBUG");
-
             let log_entry_to_apply = &stable_data.log[index_to_apply as usize];
 
             self.apply_to_state_machine(log_entry_to_apply).await?;
