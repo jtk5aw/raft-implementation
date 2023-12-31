@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::convert;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -8,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tonic::Request;
 use tonic::transport::Channel;
-use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput, RequestVoteOutput};
+use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput};
 use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
 
@@ -31,7 +30,6 @@ pub enum StateMachineError {
 pub enum CandidateError {
     NoClientFound(String),
     RequestForVoteFailure(String),
-    CustomError(String),
 }
 
 // Structs
@@ -358,6 +356,10 @@ impl LeaderActions for PeerConnections {
                     tracing::info!(?peer_addr, "Peer's term is greater than this node's. Converting to follower");
                     Err(LeaderError::ConvertToFollower(append_entries_output.term))
                 } else {
+                    // TODO TODO TODO: Right now this will happen when a node is behind and needs to catch up. Need to handle that here
+                    // Also some weird cases during elections where this occurs? I've just seen that in the logs don't have much details on it
+                    // could basically be the same scenario as above but I am not 100% sure. 
+
                     todo!("Peer returned append_entries success of false but has a lower term. I don't know if this can happen? For now just panic");
                 }
             },
