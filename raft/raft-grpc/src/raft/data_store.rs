@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::raft::node::{RaftImpl, StateMachineError};
+use crate::raft::node::RaftImpl;
 use crate::raft::state::{RaftStableData, RaftVolatileData};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::LogEntry;
+use crate::raft::peer::StateMachineError;
 
 // TODO: Long term consider decoupling the Raft Node and the data store even more.
 //  this isn't really any form of abstraction right now (and that makes things easier)
@@ -57,6 +58,8 @@ impl StateMachine for RaftImpl {
         while volatile_data.last_applied < volatile_data.commit_index {
 
             let index_to_apply = volatile_data.last_applied + 1;
+
+            tracing::info!(?stable_data.log, "DEBUG DEBUG DEBUG");
 
             let log_entry_to_apply = &stable_data.log[index_to_apply as usize];
 

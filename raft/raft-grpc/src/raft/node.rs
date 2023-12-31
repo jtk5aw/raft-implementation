@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, min};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
@@ -6,13 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use rand::Rng;
 use tokio::sync::Mutex;
-use tokio::time::{self, sleep, MissedTickBehavior, interval};
+use tokio::time::{sleep, MissedTickBehavior, interval};
 use tonic::{Request, Response, Status};
-use crate::raft;
 use crate::raft::data_store::{DataStore, StateMachine};
-use crate::raft::follower::FollowerActions;
-use crate::raft::leader::LeaderActions;
-use crate::raft::peer::{PeerConnections, PeerSetup};
+use crate::raft::peer::{PeerConnections, PeerSetup, StateMachineError, LeaderActions, CandidateActions};
 use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState, RaftNodeType};
 use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
@@ -20,16 +17,21 @@ use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
 use crate::shared::Value;
 
+// Constants
+const HEARTBEAT_INTERVAL: u64 = 500;
+
 // Errors TODO: Try to make it so this doesn't have to be shared at the top level
-#[derive(Debug)]
-pub enum StateMachineError {
-    FailedToWriteToLogs(String),
-    FailedToApplyLogs(String),
-}
 
 #[derive(Debug)]
 pub enum HeartbeatError {
+    FailedToPingPeers(StateMachineError),
     CustomError(String),
+}
+
+impl From<StateMachineError> for HeartbeatError {
+    fn from(err: StateMachineError) -> HeartbeatError {
+        HeartbeatError::FailedToPingPeers(err)
+    }
 }
 
 impl From<String> for HeartbeatError {
@@ -97,49 +99,112 @@ impl RaftImpl {
      */
     #[tracing::instrument(skip_all, ret, err(Debug))]
     pub async fn heartbeat(
+        addr: String,
         peer_connections: PeerConnections,
         raft_stable_state: RaftStableState,
+        raft_volatile_state: RaftVolatileState,
     ) -> Result<(), HeartbeatError> {
         // Won't do a bunch of ticks at once to "catch up"
-        let mut interval = interval(Duration::from_millis(500));
+        let mut interval = interval(Duration::from_millis(HEARTBEAT_INTERVAL));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             interval.tick().await;
             let node_type = {
                 raft_stable_state.raft_data.lock().await.node_type.clone()
-                // Done in brackets to get node type but not keep holding the lock.
-                // because if its a Follower its going to sleep
             };
-
             match node_type {
+                RaftNodeType::Follower(_) | RaftNodeType::Candidate => {
+                    // Wait a little longer for followers and candidates
+                    let random = {
+                        let mut rng = rand::thread_rng();
+                        rng.gen_range(50..150)
+                    };
+                    sleep(Duration::from_millis(random)).await;
+                },
+                _ => { 
+                    // do nothing 
+                }
+            }
+            let mut raft_stable_data = raft_stable_state.raft_data.lock().await;
+
+            match raft_stable_data.node_type {
                 RaftNodeType::StartingUp => {
                     tracing::info!("Not all peers connected");
                     sleep(Duration::from_secs(5)).await;
                 },
                 RaftNodeType::Follower(pinged) => {
                     if pinged {
+                        tracing::info!("Already pinged, reset follower status");
+                        raft_stable_data.node_type = RaftNodeType::Follower(false);
                         continue;
                     }
 
-                    // Add Jitter
-                    let random = {
-                        let mut rng = rand::thread_rng();
-                        rng.gen_range(0..100)
-                    };
-                    sleep(Duration::from_millis(random)).await;
 
-                    let _raft_stable_state = raft_stable_state.raft_data.lock().await;
+                    tracing::info!("Convert to candidate");
+                    raft_stable_data.node_type = RaftNodeType::Candidate;
+                    raft_stable_data.voted_for = Some(addr.to_owned());
+                    raft_stable_data.current_term += 1;
+                    tracing::info!(raft_stable_data.current_term, "Begin request for votes");
 
-                    tracing::info!("Waiting for heartbeat: {:?}", pinged);
+                    let voted_leader = peer_connections.request_votes(
+                        addr.to_owned(), 
+                        &raft_stable_data
+                    ).await.won_election;
+
+                    if voted_leader {
+                        tracing::info!("Successfully voted to be leader");
+                        raft_stable_data.node_type = RaftNodeType::Leader;
+                    } else {
+                        tracing::info!("Not voted leader. Remain candidate unless leader heartbeat received");
+                        raft_stable_data.voted_for = None;
+                    }
                 },
-                _ => {
-                    todo!("Haven't implemented heartbeat for other Node Types yet");
-                }
+                RaftNodeType::Leader => {
+                    let mut raft_volatile_data = raft_volatile_state.raft_data.lock().await;
+                    let log_entries = vec![LogEntry {
+                        log_action: LogAction::Noop.into(),
+                        value: None,
+                        term: raft_stable_data.current_term,
+                    }];
+
+                    match peer_connections.write_and_share_logs(
+                        addr.to_string(),
+                        raft_stable_data.deref_mut(),
+                        raft_volatile_data.deref_mut(),
+                        log_entries
+                    ).await {
+                        Ok(_) => {
+                            tracing::info!("Successfully communicated value to majority of peers");
+                            Ok(())
+                        },
+                        Err(err) => {
+                            tracing::error!(err = ?err, "Failed to communicate value to majority of peers");
+                            Err(err)
+                        }
+                    }?;
+                },
+                RaftNodeType::Candidate => {
+                    tracing::info!("Already candidate, ask for votes again");
+                    raft_stable_data.voted_for = Some(addr.to_owned());
+                    raft_stable_data.current_term += 1;
+                    tracing::info!(raft_stable_data.current_term, "Beging request for votes");
+
+                    let voted_leader = peer_connections.request_votes(
+                        addr.to_owned(), 
+                        &raft_stable_data
+                    ).await.won_election;
+
+                    if voted_leader {
+                        tracing::info!("Successfully voted for leader");
+                        raft_stable_data.node_type = RaftNodeType::Leader;
+                    } else {
+                        tracing::info!("Not voted leader. Remain candidate unless leader heartbeat received");
+                        raft_stable_data.voted_for = None;
+                    }
+                },
             }
         }
-
-        Ok(())
     }
 
     /**
@@ -198,6 +263,96 @@ impl RaftImpl {
 
 }
 
+#[tonic::async_trait]
+pub trait FollowerActions {
+    /**
+     * Takes the value provided from a peer and applies it to the log.
+     * Before doing so it truncates the log from the provided Previous Log Index + 1.
+     * This will also update the state machine if the commit index has increased.
+     *
+     * Returns:
+     * Ok(AppendEntriesOutput): Output determine if update was successful.
+     * Err(StateMachineError): The error faced when attempting to modify the state machine.
+     */
+    async fn make_update_from_peer(
+        &self,
+        raft_stable_data: &mut RaftStableData,
+        raft_volatile_data: &mut RaftVolatileData,
+        append_entries_input: AppendEntriesInput,
+    ) -> Result<AppendEntriesOutput, StateMachineError>;
+
+    /**
+     * Adds the provided LogEntry values to own servers logs.
+     */
+    async fn write_to_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        log_entries: Vec<LogEntry>
+    );
+}
+
+#[tonic::async_trait]
+impl FollowerActions for RaftImpl {
+    async fn make_update_from_peer(
+        &self,
+        raft_stable_data: &mut RaftStableData,
+        raft_volatile_data: &mut RaftVolatileData,
+        append_entries_input: AppendEntriesInput,
+    ) -> Result<AppendEntriesOutput, StateMachineError> {
+        tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
+
+        raft_stable_data.log.truncate((append_entries_input.prev_log_index + 1) as usize);
+
+        tracing::info!("Appending new entries to the log");
+
+        self.write_to_logs(
+            raft_stable_data,
+            append_entries_input.entries
+        ).await;
+
+        if raft_volatile_data.commit_index < append_entries_input.leader_commit {
+            tracing::info!("Updating commit index");
+            raft_volatile_data.commit_index = min(
+                (raft_stable_data.log.len() - 1) as i64,
+                append_entries_input.leader_commit
+            );
+        }
+
+        tracing::info!("Attempting to update state machine");
+
+        match self.update_state_machine(
+            raft_stable_data,
+            raft_volatile_data
+        ).await {
+            Ok(num_updates) => {
+                tracing::info!(?num_updates, "Successful updated the state machine");
+                Ok(AppendEntriesOutput {
+                    success: true,
+                    term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
+                })
+            },
+            Err(err) => {
+                tracing::error!(err = ?err, "Failed to update the state machine");
+                Err(err)
+            }
+        }
+    }
+
+    async fn write_to_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        log_entries: Vec<LogEntry>
+    ) {
+        tracing::info!("Writing new value to own log");
+
+        log_entries
+            .iter()
+            .for_each(|log_entry| {
+                stable_data.log.push(log_entry.to_owned());
+            });
+    }
+}
+
 // TODO: ADD AUTH TO THESE CALLS SO THAT IT CAN BE PUBLICLY EXPOSED WITHOUT ISSUE
 // Do it using a middleware/extension and probably easiest to just do with an API Key for now.
 // This also  might be an option: https://developer.hashicorp.com/vault/docs/auth/aws
@@ -242,7 +397,9 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Add new values to own logs and to peer logs");
 
-        match self.write_and_share_logs(
+        
+        match self.peer_connections.write_and_share_logs(
+            self.addr.to_string(),
             raft_stable_data.deref_mut(),
             raft_volatile_data.deref_mut(),
             log_entries
@@ -341,6 +498,7 @@ impl RaftInternal for RaftImpl {
 
         // Candidate is requesting votes on an old term. Vote no
         if raft_stable_state.current_term > request_vote_input.term {
+            tracing::info!("Candidate is requesting votes on an old term. Vote no");
             return Ok(Response::new(
                 RequestVoteOutput {
                     term: raft_stable_state.current_term,
@@ -351,6 +509,7 @@ impl RaftInternal for RaftImpl {
 
         // Already voted for another candidate. Vote no
         if raft_stable_state.voted_for.as_ref().is_some_and(|voted| voted != &request_vote_input.candidate_id) {
+            tracing::info!("Already voted for another candidate. Vote no");
             return Ok(Response::new(
                 RequestVoteOutput {
                     term: raft_stable_state.current_term,
@@ -361,6 +520,7 @@ impl RaftInternal for RaftImpl {
 
         // Candidate has out of date logs. Vote no
         if !candidate_more_up_to_date(&raft_stable_state, &request_vote_input) {
+            tracing::info!("Candidate has out of date logs. Vote no");
             return Ok(Response::new(
                 RequestVoteOutput {
                     term: raft_stable_state.current_term,
@@ -369,12 +529,10 @@ impl RaftInternal for RaftImpl {
             ));
         }
 
-        // TODO TODO TODO: Actually test sending request votes to each other and create a heartbeat thread
-        //  on server start up that can be interrupted and restarted
-
         // Candidate has a recent enough term and is more up to date than the current node. Vote yes
         let mut raft_stable_state = raft_stable_state;
         raft_stable_state.voted_for = Some(request_vote_input.candidate_id);
+        raft_stable_state.node_type = RaftNodeType::Follower(true);
 
         Ok(Response::new(RequestVoteOutput {
             term: request_vote_input.term, // TODO: Determine if this is the term that should be returned in the case where vote is granted
@@ -418,7 +576,10 @@ impl RaftInternal for RaftImpl {
         let prev_term_matches = append_entries_input.prev_log_index == 0 || raft_stable_data.log.get(append_entries_input.prev_log_index as usize)
             .map_or_else(
                 || true,
-                |val| append_entries_input.prev_log_term == val.term
+                |val| {
+                    tracing::info!(append_entries_input.prev_log_term, val.term, "Comparing input prev_log_term with logs term");
+                    append_entries_input.prev_log_term == val.term
+                }
             );
 
         if !prev_term_matches {
@@ -430,6 +591,11 @@ impl RaftInternal for RaftImpl {
             }))
         };
 
+
+        tracing::info!("Marking self as pinged");
+        raft_stable_data.node_type = RaftNodeType::Follower(true);
+
+        tracing::info!("Updating Logs");
         let output = self.make_update_from_peer(
             raft_stable_data.deref_mut(),
             raft_volatile_data.deref_mut(),
@@ -517,7 +683,9 @@ fn candidate_more_up_to_date(
             let last_log_index = (raft_stable_state.log.len() - 1) as i64;
             let candidate_last_log_index = input.last_log_index;
 
-            if candidate_last_log_index > last_log_index {
+            tracing::info!(?last_log_index, ?candidate_last_log_index, "Comparing log indexes");
+
+            if candidate_last_log_index >= last_log_index {
                 return true;
             }
 

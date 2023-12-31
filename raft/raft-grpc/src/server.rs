@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
@@ -112,6 +113,7 @@ impl RisDbSetup for RisDb {
 
         let heartbeat_peer_connections = raft.peer_connections.clone();
         let heartbeat_raft_state = raft.state.clone();
+        let heartbeat_volativle_raft_state = raft.volatile_state.clone();
 
         let connect_to_peers_peer_connections = raft.peer_connections.clone();
         let connect_to_peers_raft_stable_state = raft.state.clone();
@@ -125,13 +127,15 @@ impl RisDbSetup for RisDb {
         let serve_wrapper_handle = tokio::spawn(
             self.serve_wrapper(
                 raft,
-                risdb
+                risdb,
             )
         );
         let heartbeat_handle = tokio::spawn(
             RaftImpl::heartbeat(
+                addr.to_string(),
                 heartbeat_peer_connections,
-                heartbeat_raft_state
+                heartbeat_raft_state,
+                heartbeat_volativle_raft_state,
             )
         );
         let peer_connections_handle = tokio::spawn(
