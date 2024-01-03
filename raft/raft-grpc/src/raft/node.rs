@@ -161,6 +161,7 @@ impl RaftImpl {
                     }
                 },
                 RaftNodeType::Leader => {
+                    tracing::info!("Leader sharing heartbeat log");
                     let mut raft_volatile_data = raft_volatile_state.raft_data.lock().await;
                     let log_entries = vec![LogEntry {
                         log_action: LogAction::Noop.into(),
@@ -293,6 +294,12 @@ pub trait FollowerActions {
 
 #[tonic::async_trait]
 impl FollowerActions for RaftImpl {
+    
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn make_update_from_peer(
         &self,
         raft_stable_data: &mut RaftStableData,

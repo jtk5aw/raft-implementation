@@ -27,6 +27,7 @@ pub enum StateMachineError {
     FailedToApplyLogs(String),
 }
 
+#[derive(Debug)]
 pub enum CandidateError {
     NoClientFound(String),
     RequestForVoteFailure(String),
@@ -57,6 +58,7 @@ pub struct ProposeToPeersResult {
     request_append_entries_results: Vec<Result<i64, LeaderError>>
 }
 
+#[derive(Debug)]
 pub struct RequestVotesResult {
     pub won_election: bool
 }
@@ -182,6 +184,11 @@ pub trait LeaderActions {
 
 #[tonic::async_trait]
 impl LeaderActions for PeerConnections {
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn write_and_share_logs(
         &self,
         addr: String,
@@ -248,7 +255,10 @@ impl LeaderActions for PeerConnections {
 
         Ok(())
     }
-
+    #[tracing::instrument(
+        skip_all,
+        ret,
+    )]
     async fn share_to_peers(
         &self,
         addr: String,
@@ -280,6 +290,11 @@ impl LeaderActions for PeerConnections {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn calculate_new_commit_index(
         &self,
         count_communicated: i64,
@@ -303,6 +318,11 @@ impl LeaderActions for PeerConnections {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn request_append_entries_peer(
         &self,
         addr: String,
@@ -416,6 +436,10 @@ pub trait CandidateActions {
 
 #[tonic::async_trait]
 impl CandidateActions for PeerConnections {
+    #[tracing::instrument(
+        skip_all,
+        ret,
+    )]
     async fn request_votes(
         &self,
         addr: String,
@@ -452,6 +476,11 @@ impl CandidateActions for PeerConnections {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn request_vote_from_peer(
         &self,
         addr: String,
@@ -491,6 +520,10 @@ impl CandidateActions for PeerConnections {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        ret
+    )]
     async fn determine_election_result(
         &self,
         count_voted_yes: i64,
