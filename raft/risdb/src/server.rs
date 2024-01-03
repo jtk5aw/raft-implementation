@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, net::SocketAddr};
 
 use opentelemetry::global;
 use raft_grpc::server::{RisDb, RisDbSetup};
@@ -7,8 +7,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-    setup_tracing()?;
 
     // I don't think this will be forever but for now it lets multiple servers run 
     // on local-host
@@ -21,12 +19,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("[::1]:{}", my_port).parse()?;
     let ris_db = RisDb { };
 
+    setup_tracing(addr)?;
+
     let _ = ris_db.startup(addr, vec![client_port.to_owned(), client_port_2.to_owned()]).await;
     
     Ok(())
 }
 
-fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
+fn setup_tracing(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     // // construct a subscriber that prints formatted traces to stdout
     // let subscriber = tracing_subscriber::fmt()
     //     // Use a more compact, abbreviated log format
@@ -50,7 +50,7 @@ fn setup_tracing() -> Result<(), Box<dyn std::error::Error>> {
     // There are other OTel crates that provide pipelines for the vendors
     // mentioned earlier.
     let tracer = opentelemetry_jaeger::new_pipeline()
-        .with_service_name("risdb")
+        .with_service_name(format!("risdb-{:?}", addr))
         .install_simple()?;
 
     // Create a tracing layer with the configured tracer
