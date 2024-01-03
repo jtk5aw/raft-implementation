@@ -47,6 +47,11 @@ pub trait StateMachine {
 #[tonic::async_trait]
 impl StateMachine for RaftImpl {
 
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn update_state_machine(
         &self,
         stable_data: &RaftStableData,
@@ -70,6 +75,11 @@ impl StateMachine for RaftImpl {
         Ok(num_updates)
     }
 
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
     async fn apply_to_state_machine(
         &self,
         log_entry_to_apply: &LogEntry,
