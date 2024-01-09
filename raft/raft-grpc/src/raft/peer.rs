@@ -145,7 +145,6 @@ pub trait LeaderActions {
         addr: String,
         stable_data: &RaftStableData,
         curr_commit_index: i64,
-        log_entries: &Vec<LogEntry>
     ) -> ProposeToPeersResult;
 
     /**
@@ -177,8 +176,7 @@ pub trait LeaderActions {
         count_communicated: Arc<Mutex<i64>>,
         peer_addr: String,
         peer_data: &mut PeerData,
-        curr_commit_index: i64,
-        log_entries: &Vec<LogEntry>,
+        curr_commit_index: i64
     ) -> Result<i64, LeaderError>;
 }
 
@@ -212,7 +210,6 @@ impl LeaderActions for PeerConnections {
             addr,
             stable_data,
             volatile_data.commit_index,
-            &log_entries
         ).await;
 
         let convert_to_follower: Vec<&Result<i64, LeaderError>> = propose_to_peers_result.request_append_entries_results
@@ -255,6 +252,7 @@ impl LeaderActions for PeerConnections {
 
         Ok(())
     }
+
     #[tracing::instrument(
         skip_all,
         ret,
@@ -264,7 +262,6 @@ impl LeaderActions for PeerConnections {
         addr: String,
         raft_stable_data: &RaftStableData,
         curr_commit_index: i64,
-        log_entries: &Vec<LogEntry>
     ) -> ProposeToPeersResult {
 
         let count_communicated: Arc<Mutex<i64>> = Arc::new(Mutex::new(1)); // Set to 1 to include self
@@ -278,8 +275,7 @@ impl LeaderActions for PeerConnections {
                     count_communicated.clone(),
                     peer_addr.to_owned(),
                     peer_data,
-                    curr_commit_index,
-                    log_entries
+                    curr_commit_index
                 ))
             ).await
         };
@@ -331,7 +327,6 @@ impl LeaderActions for PeerConnections {
         peer_addr: String,
         peer_data: &mut PeerData,
         curr_commit_index: i64,
-        log_entries: &Vec<LogEntry>,
     ) -> Result<i64, LeaderError> {
         let peer_leader_state = peer_data.leader_state
             .as_mut()
@@ -341,11 +336,11 @@ impl LeaderActions for PeerConnections {
             .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
 
-        // Make request to append entries TODO: Play with the timeout time here
-        let request_result = match timeout(Duration::from_secs(5), peer_leader_connection.append_entries(AppendEntriesInput {
+        // Make request to append entries
+        let request_result = match timeout(Duration::from_secs(1), peer_leader_connection.append_entries(AppendEntriesInput {
             leader_id: addr.to_string(),
             term: raft_stable_data.current_term, 
-            entries: log_entries.to_owned(),
+            entries: raft_stable_data.log[(peer_leader_state.next_index as usize)..].to_vec(),
             prev_log_index: (raft_stable_data.log.len() - 1) as i64,
             prev_log_term: raft_stable_data.log.last().expect("Log should never be an empty list").term,
             leader_commit: curr_commit_index,
@@ -379,6 +374,7 @@ impl LeaderActions for PeerConnections {
                     // TODO TODO TODO: Right now this will happen when a node is behind and needs to catch up. Need to handle that here
                     // Also some weird cases during elections where this occurs? I've just seen that in the logs don't have much details on it
                     // could basically be the same scenario as above but I am not 100% sure. 
+                    tracing::error!("Response from ({:?}) with failure with lower term {:?}", peer_leader_state, append_entries_output);
 
                     todo!("Peer returned append_entries success of false but has a lower term. I don't know if this can happen? For now just panic");
                 }

@@ -97,6 +97,9 @@ impl RaftImpl {
      * `Ok(())` - Stopped heartbeating
      * `Error(HeartbeatError)` - Failed to complete heartbeat for some reason.
      */
+    // TODO: This heartbeat thread leads to one massing and basically impossible 
+    // to debug span. If want to set up otel or something like it this should be tweaked
+    // to make it's own spans on every "tick"
     #[tracing::instrument(skip_all, ret, err(Debug))]
     pub async fn heartbeat(
         addr: String,
