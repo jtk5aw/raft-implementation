@@ -182,12 +182,6 @@ impl RisDbSetup for RisDb {
         Ok(())
     }
 
-    // TODO TODO TODO: 
-    // 1) Make it so that servers can be brought back online. This means catching up a server that falls behind
-    // 2) Make it so that when a leader gets a response back saying that another node ahs seen a more recnet term
-    // that it handles it gracefully and transitiona away from being leader. Know how this should happen (should it trigger
-    // an election immediately?)
-
     async fn serve_wrapper(
         self,
         raft: RaftImpl,

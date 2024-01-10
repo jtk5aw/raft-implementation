@@ -336,52 +336,61 @@ impl LeaderActions for PeerConnections {
             .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
 
+        // TODO TODO TODO: A bug that can happen is two nodes are elected leaders for two separate terms
+        // they can both begin trying to make requests to each other to update logs with heartbeats
+        // and if the timing is unlucky they will just both keep sending requests to each other
+        // and nothing will happen cause the request will always time out because it holds the lock on its
+        // own state
+        // Simple fix is adding jitter to the below retries to prevent this. Don't know a good way 
+        // to test this at the moment though. 
+
         // Make request to append entries
-        let request_result = match timeout(Duration::from_secs(1), peer_leader_connection.append_entries(AppendEntriesInput {
-            leader_id: addr.to_string(),
-            term: raft_stable_data.current_term, 
-            entries: raft_stable_data.log[(peer_leader_state.next_index as usize)..].to_vec(),
-            prev_log_index: (raft_stable_data.log.len() - 1) as i64,
-            prev_log_term: raft_stable_data.log.last().expect("Log should never be an empty list").term,
-            leader_commit: curr_commit_index,
-        })).await {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!(?e, ?peer_addr, "Call to append entires to peer timed out");
-                Err(LeaderError::FailedToAppendEntries(peer_addr.to_owned()))?
-            }
-        };
-
-        match request_result {
-            Ok(res) => {
-                let append_entries_output = res.into_inner();
-
-                if append_entries_output.success {
-                    tracing::info!(?peer_addr, "Successfully appended entries to peer");
-
-                    peer_leader_state.next_index = raft_stable_data.log.len()  as i64;
-                    peer_leader_state.match_index = (raft_stable_data.log.len() - 1) as i64;
-
-                    if peer_leader_state.match_index >= curr_commit_index {
-                        tracing::info!("Peer now has a match index where all new logs are applied. Updated count of peers communicated to");
-                        *count_communicated.lock().await += 1;
-                    }
-                    Ok(peer_leader_state.match_index)
-                } else if !append_entries_output.success && append_entries_output.term > raft_stable_data.current_term {
-                    tracing::info!(?peer_addr, "Peer's term is greater than this node's. Converting to follower");
-                    Err(LeaderError::ConvertToFollower(append_entries_output.term))
-                } else {
-                    // TODO TODO TODO: Right now this will happen when a node is behind and needs to catch up. Need to handle that here
-                    // Also some weird cases during elections where this occurs? I've just seen that in the logs don't have much details on it
-                    // could basically be the same scenario as above but I am not 100% sure. 
-                    tracing::error!("Response from ({:?}) with failure with lower term {:?}", peer_leader_state, append_entries_output);
-
-                    todo!("Peer returned append_entries success of false but has a lower term. I don't know if this can happen? For now just panic");
+        tracing::info!("Append entires to {:?} until it is caught up", peer_addr);
+        loop {
+            tracing::info!("Make request to {:?} with next_index of {:?}", peer_addr, peer_leader_state.next_index);
+            let request_result = match timeout(Duration::from_secs(1), peer_leader_connection.append_entries(AppendEntriesInput {
+                leader_id: addr.to_string(),
+                term: raft_stable_data.current_term,
+                entries: raft_stable_data.log[(peer_leader_state.next_index as usize)..].to_vec(),
+                prev_log_index: peer_leader_state.next_index - 1,
+                prev_log_term: raft_stable_data.log[(peer_leader_state.next_index - 1) as usize].term,
+                leader_commit: curr_commit_index,
+            })).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!(?e, ?peer_addr, "Call to append entires to peer timed out. Retry");
+                    continue;
                 }
-            },
-            Err(e) => {
-                tracing::error!(?e, ?peer_addr, "Failed to append entries to peer");
-                Err(LeaderError::FailedToAppendEntries(peer_addr.to_owned()))
+            };
+
+            let res = match request_result {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::error!(?e, ?peer_addr, "Failed to append entries to peer");
+                    Err(LeaderError::FailedToAppendEntries(peer_addr.to_owned()))?
+                }
+            };
+
+            let append_entries_output = res.into_inner();
+
+            if append_entries_output.success {
+                tracing::info!(?peer_addr, "Successfully appended entries to peer");
+
+                peer_leader_state.next_index = raft_stable_data.log.len()  as i64;
+                peer_leader_state.match_index = (raft_stable_data.log.len() - 1) as i64;
+
+                if peer_leader_state.match_index >= curr_commit_index {
+                    tracing::info!("Peer now has a match index where all new logs are applied. Updated count of peers communicated to");
+                    *count_communicated.lock().await += 1;
+                }
+                return Ok(peer_leader_state.match_index);
+            } else if !append_entries_output.success && append_entries_output.term > raft_stable_data.current_term {
+                tracing::info!(?peer_addr, "Peer's term is greater than this node's. Converting to follower");
+                Err(LeaderError::ConvertToFollower(append_entries_output.term))?
+            } else {
+                // This is the only branch that loops again
+                tracing::warn!("Response from ({:?}) with failure with lower term {:?}. Decrement next_index and try again", peer_addr, append_entries_output);
+                peer_leader_state.next_index -= 1;
             }
         }
     }

@@ -583,15 +583,10 @@ impl RaftInternal for RaftImpl {
             }));
         };
 
-        // TODO TODO TODO: Fix this. This is broken. Right now for a new node coming up this should return false
-        // but for some reason it doesn't I haven't really looked at the logic but I know that the default || true
-        // was originally just to make replicatino work when the log was empty. I think hard coding the log to start 
-        // at size 1 which I have since done makes that not necessary? 
-
         // As a base case, if the previous term is the first log entry is matches
         let prev_term_matches = append_entries_input.prev_log_index == 0 || raft_stable_data.log.get(append_entries_input.prev_log_index as usize)
             .map_or_else(
-                || true,
+                || false,
                 |val| {
                     tracing::info!(append_entries_input.prev_log_term, val.term, "Comparing input prev_log_term with logs term");
                     append_entries_input.prev_log_term == val.term
