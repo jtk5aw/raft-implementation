@@ -234,20 +234,18 @@ impl RaftImpl {
         sleep(Duration::from_secs(5)).await;
 
         // Attempt to create all connections
-        for peer_port in peers {
-            let peer_addr = format!("https://[::1]:{}", peer_port);
-
+        for peer_addr in peers {
             let result = RaftInternalClient::connect(
-                peer_addr.to_owned()
+                peer_addr.to_string()
             ).await;
 
             match result {
                 Ok(client) => peer_connections.handle_client_connection(
-                    addr, peer_addr, client
+                    addr, peer_addr.to_string(), client
                 ).await,
                 Err(err) => {
                     tracing::error!(%err, "Error connecting to peer");
-                    error_vec.push(peer_port);
+                    error_vec.push(peer_addr.to_string());
                 }
             }
         }
@@ -393,6 +391,18 @@ impl RaftInternal for RaftImpl {
 
         let mut raft_stable_data = self.state.raft_data.lock().await;
         let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
+
+        tracing::info!("Checking if node is leader");
+        
+        match raft_stable_data.node_type {
+            RaftNodeType::Leader => {
+                tracing::error!("Node is leader, continue");
+            },
+            _ => {
+                tracing::info!("Node is not the leader cancel request");
+                return Err(Status::failed_precondition("Node is not the leader".to_owned()));
+            }
+        }
 
         tracing::info!("Converting input data to log entries");
 

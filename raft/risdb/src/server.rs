@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, net::SocketAddr};
 
 use raft_grpc::server::{RisDb, RisDbSetup};
 
@@ -12,14 +12,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // on local-host
     let args: Vec<_> = env::args().collect();
 
-    let my_port = args.get(1).unwrap();
-    let client_port = args.get(2).unwrap();
-    let client_port_2 = args.get(3).unwrap(); // quick spot check shows this can work. Left out for the time being
+    let my_addr_unparsed = args.get(1).unwrap();
+    let client_addr = args.get(2).unwrap();
+    let client_addr_2 = args.get(3).unwrap(); // quick spot check shows this can work. Left out for the time being
     
-    let addr = format!("[::1]:{}", my_port).parse()?;
+    let addr: SocketAddr = my_addr_unparsed.parse()?;
     let ris_db = RisDb { };
 
-    let _ = ris_db.startup(addr, vec![client_port.to_owned(), client_port_2.to_owned()]).await;
+    let _ = ris_db.startup(addr, vec![client_addr.to_owned(), client_addr_2.to_owned()]).await;
     
     Ok(())
 }
