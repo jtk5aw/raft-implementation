@@ -9,7 +9,8 @@ use crate::raft::peer::StateMachineError;
 
 // TODO: Long term consider decoupling the Raft Node and the data store even more.
 //  this isn't really any form of abstraction right now (and that makes things easier)
-//  but any sort of complicated data store would serve well from abstracting this better
+//  but any sort of complicated data store would serve well from abstracting this better.
+//  and what I'm really getting at is making this backed on non-volatile storage aka disk.
 
 #[derive(Debug, Clone)]
 pub struct DataStore {
@@ -26,7 +27,7 @@ pub trait StateMachine {
      * Returns:
      * Ok(()): All logs applied successfully and last_applied = commit_index now.
      * Err(_): Some issue while attempting to apply logs to the state machine. last_applied is one less than
-     *         the index that causes the failure to occur. I.E if index 2 doesn't contain a value and can't be written
+     *         the index that causes the failure to occur. I.E if index 2 does not contain a value and can not be written
      *         to the state machine, last_applied will be 1 when the error is returned.
      */
     async fn update_state_machine(
@@ -110,5 +111,296 @@ impl StateMachine for RaftImpl {
                 Err(StateMachineError::FailedToApplyLogs("No log action was stored".to_owned()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shared::Value;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn noop_apply_to_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        let expected_data = {
+            raft_impl.data_store.data.lock().await.clone()
+        };
+
+        let result = raft_impl.apply_to_state_machine(&LogEntry {
+            log_action: LogAction::Noop as i32,
+            value: None,
+            term: 0,
+        }).await;
+
+        let after_data = {
+            raft_impl.data_store.data.lock().await.clone()
+        };
+
+        assert!(
+            result.is_ok(),
+            "Noop log entry should not cause an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            expected_data == after_data,
+            "The two values were not equal `{:?}` after_data: `{:?}`",
+            expected_data, after_data
+        );
+    }
+
+    #[tokio::test]
+    async fn put_apply_to_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        let expected_data = {
+            let mut original = raft_impl.data_store.data.lock().await.clone();
+            original.insert("key".to_owned(), "value".to_owned());
+            original
+        };
+
+        let result = raft_impl.apply_to_state_machine(&LogEntry {
+            log_action: LogAction::Put as i32,
+            value: Some(Value {
+                key: "key".to_owned(),
+                value: "value".to_owned(),
+            }),
+            term: 0,
+        }).await;
+
+        let after_data = {
+            raft_impl.data_store.data.lock().await.clone()
+        };
+
+        assert!(
+            result.is_ok(),
+            "Noop log entry should not cause an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            expected_data == after_data,
+            "The two values were not equal `{:?}` after_data: `{:?}`",
+            expected_data, after_data
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_put_apply_to_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        let expected_data = {
+            let mut original = raft_impl.data_store.data.lock().await.clone();
+            original.insert("key".to_owned(), "value_2".to_owned());
+            original
+        };
+
+        let _ = raft_impl.apply_to_state_machine(&LogEntry {
+            log_action: LogAction::Put as i32,
+            value: Some(Value {
+                key: "key".to_owned(),
+                value: "value".to_owned(),
+            }),
+            term: 0,
+        }).await;
+        let result = raft_impl.apply_to_state_machine(&LogEntry {
+            log_action: LogAction::Put as i32,
+            value: Some(Value {
+                key: "key".to_owned(),
+                value: "value_2".to_owned(),
+            }),
+            term: 0,
+        }).await;
+
+        let after_data = {
+            raft_impl.data_store.data.lock().await.clone()
+        };
+
+        assert!(
+            result.is_ok(),
+            "Noop log entry should not cause an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            expected_data == after_data,
+            "The two values were not equal `{:?}` after_data: `{:?}`",
+            expected_data, after_data
+        );
+    }
+
+    #[tokio::test]
+    async fn none_apply_to_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        let result = raft_impl.apply_to_state_machine(&LogEntry {
+            log_action: -1,
+            value: None,
+            term: 0,
+        }).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn two_noops_update_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        {
+            // setup stable data
+            let mut raft_stable_data = raft_impl.state.raft_data.lock().await;
+            raft_stable_data.log.append(&mut vec![
+                LogEntry{
+                    log_action: LogAction::Noop as i32,
+                    value: None,
+                    term: 1
+                },
+                LogEntry{
+                    log_action: LogAction::Noop as i32,
+                    value: None,
+                    term: 1
+                }
+            ]);
+
+            // setup volatile data
+            let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+            raft_volatile_data.commit_index = 2;
+        }
+
+        let raft_stable_data = raft_impl.state.raft_data.lock().await;
+        let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+
+        let result = raft_impl.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+
+        assert!(
+            result.is_ok(),
+            "Noop log entries should not cause an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            result.as_ref().unwrap() == &2,
+            "Two noop log entries should be applied, result was `{:?}`",
+            result
+        );
+        assert!(
+            raft_volatile_data.last_applied == 2,
+            "Raft volatile data was not updated as expected: raft_volatile_data `{:?}`",
+            raft_volatile_data
+        );
+        let data_store = raft_impl.data_store.data.lock().await;
+        assert!(
+            *data_store == HashMap::new(),
+            "Raft data store should not have experienced changes from two Noops: data_store: {:?}",
+            data_store
+        )
+    }
+
+    #[tokio::test]
+    async fn two_puts_update_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        {
+            // setup stable data
+            let mut raft_stable_data = raft_impl.state.raft_data.lock().await;
+            raft_stable_data.log.append(&mut vec![
+                LogEntry{
+                    log_action: LogAction::Put as i32,
+                    value: Some(Value { key: "world".to_string(), value: "hello".to_string() }),
+                    term: 1
+                },
+                LogEntry{
+                    log_action: LogAction::Put as i32,
+                    value: Some(Value { key: "hello".to_string(), value: "world".to_string() }),
+                    term: 1
+                }
+            ]);
+
+            // setup volatile data
+            let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+            raft_volatile_data.commit_index = 2;
+        }
+
+        let raft_stable_data = raft_impl.state.raft_data.lock().await;
+        let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+
+        let result = raft_impl.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+
+        assert!(
+            result.is_ok(),
+            "Put log entries should not cause an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            result.as_ref().unwrap() == &2,
+            "Two put log entries should be applied, result was `{:?}`",
+            result
+        );
+        assert!(
+            raft_volatile_data.last_applied == 2,
+            "Raft volatile data was not updated as expected: raft_volatile_data `{:?}`",
+            raft_volatile_data
+        );
+        let data_store = raft_impl.data_store.data.lock().await;
+        let expected_data = HashMap::from([
+            ("hello".to_string(), "world".to_string()),
+            ("world".to_string(), "hello".to_string())
+        ]);
+        assert!(
+            *data_store == expected_data,
+            "Raft data store should have experienced changes from two puts: data_store: {:?}",
+            data_store
+        )
+    }
+
+    #[tokio::test]
+    async fn last_applied_equals_commit_update_state_machine() {
+        let raft_impl = RaftImpl::new("[::1]:5000".parse().unwrap());
+
+        {
+            // setup stable data
+            let mut raft_stable_data = raft_impl.state.raft_data.lock().await;
+            raft_stable_data.log.append(&mut vec![
+                LogEntry{
+                    log_action: LogAction::Noop as i32,
+                    value: None,
+                    term: 1
+                },
+                LogEntry{
+                    log_action: LogAction::Noop as i32,
+                    value: None,
+                    term: 1
+                }
+            ]);
+
+            // setup volatile data
+            let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+            raft_volatile_data.commit_index = 0;
+        }
+
+        let raft_stable_data = raft_impl.state.raft_data.lock().await;
+        let mut raft_volatile_data = raft_impl.volatile_state.raft_data.lock().await;
+
+        let result = raft_impl.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+
+        assert!(
+            result.is_ok(),
+            "No applied log entries so there shouldn't be an error, result was `{:?}`",
+            result
+        );
+        assert!(
+            result.as_ref().unwrap() == &0,
+            "No put log entries should be applied, result was `{:?}`",
+            result
+        );
+        assert!(
+            raft_volatile_data.last_applied == 0,
+            "Raft volatile data was not updated as expected: raft_volatile_data `{:?}`",
+            raft_volatile_data
+        );
+        let data_store = raft_impl.data_store.data.lock().await;
+        assert!(
+            *data_store == HashMap::new(),
+            "Raft data store should not have experienced changes from two Noops: data_store: {:?}",
+            data_store
+        )
     }
 }

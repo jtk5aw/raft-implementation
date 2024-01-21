@@ -74,7 +74,17 @@ impl RaftImpl {
                     node_type: RaftNodeType::StartingUp,
                     current_term: 0,
                     voted_for: None,
-                    log: Vec::new(),
+                    // Add a dummy value to the start of the log that should NEVER actually be applied. But starting from
+                    // 0 causes problems cause last applied and commit index also start at 0
+                    // TODO: Modify the type of this so you can literally only append to it. Make it so
+                    // this first entry can never be overwritten
+                    log: vec![
+                        LogEntry {
+                            log_action: LogAction::Noop.into(),
+                            value: None,
+                            term: -1
+                        }
+                    ],
                 })),
             },
             volatile_state: RaftVolatileState {
@@ -97,7 +107,7 @@ impl RaftImpl {
      * `Ok(())` - Stopped heartbeating
      * `Error(HeartbeatError)` - Failed to complete heartbeat for some reason.
      */
-    // TODO: This heartbeat thread leads to one massing and basically impossible 
+    // TODO: This heartbeat thread leads to one massing and basically impossible
     // to debug span. If want to set up otel or something like it this should be tweaked
     // to make it's own spans on every "tick"
     #[tracing::instrument(skip_all, ret, err(Debug))]
@@ -125,8 +135,8 @@ impl RaftImpl {
                     };
                     sleep(Duration::from_millis(random)).await;
                 },
-                _ => { 
-                    // do nothing 
+                _ => {
+                    // do nothing
                 }
             }
             let mut raft_stable_data = raft_stable_state.raft_data.lock().await;
@@ -151,7 +161,7 @@ impl RaftImpl {
                     tracing::info!(raft_stable_data.current_term, "Begin request for votes");
 
                     let voted_leader = peer_connections.request_votes(
-                        addr.to_owned(), 
+                        addr.to_owned(),
                         &raft_stable_data
                     ).await.won_election;
 
@@ -195,7 +205,7 @@ impl RaftImpl {
                     tracing::info!(raft_stable_data.current_term, "Beging request for votes");
 
                     let voted_leader = peer_connections.request_votes(
-                        addr.to_owned(), 
+                        addr.to_owned(),
                         &raft_stable_data
                     ).await.won_election;
 
@@ -295,7 +305,7 @@ pub trait FollowerActions {
 
 #[tonic::async_trait]
 impl FollowerActions for RaftImpl {
-    
+
     #[tracing::instrument(
         skip_all,
         ret,
@@ -393,7 +403,7 @@ impl RaftInternal for RaftImpl {
         let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
 
         tracing::info!("Checking if node is leader");
-        
+
         match raft_stable_data.node_type {
             RaftNodeType::Leader => {
                 tracing::error!("Node is leader, continue");
@@ -417,7 +427,7 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Add new values to own logs and to peer logs");
 
-        
+
         match self.peer_connections.write_and_share_logs(
             self.addr.to_string(),
             raft_stable_data.deref_mut(),

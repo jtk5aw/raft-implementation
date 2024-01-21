@@ -4,8 +4,6 @@ use tokio::{try_join, task::JoinHandle};
 use tonic::transport::Server;
 
 use crate::raft::node::{RaftImpl, HeartbeatError, SetupError};
-use crate::raft_grpc::log_entry::LogAction;
-use crate::raft_grpc::LogEntry;
 use crate::raft_grpc::raft_internal_server::RaftInternalServer;
 use crate::risdb::ris_db_server::RisDbServer;
 use crate::risdb_impl::{RisDbImpl, RisDbSetupError};
@@ -59,14 +57,14 @@ pub struct RisDb {}
 #[tonic::async_trait]
 pub trait RisDbSetup {
     /**
-     * Starts up this raft server and connects it to all of its peers. 
-     * 
+     * Starts up this raft server and connects it to all of its peers.
+     *
      * If it fails to connect to peers it will return an error.
-     * 
-     * `Result`: 
+     *
+     * `Result`:
      * `Ok(())` - Server has shut down
-     * `SetupError(Vec<String>)` - Server failed to connect to peers and never began serving requests. 
-     *  List of peers it failed to connect to are returned 
+     * `SetupError(Vec<String>)` - Server failed to connect to peers and never began serving requests.
+     *  List of peers it failed to connect to are returned
      */
     async fn startup(
         self,
@@ -75,9 +73,9 @@ pub trait RisDbSetup {
     ) -> Result<(), Vec<String>>;
 
     /**
-     * Wraps the `serve` function of tonic so that a try_join can be done on it 
+     * Wraps the `serve` function of tonic so that a try_join can be done on it
      * and the setup peers call
-     * 
+     *
      * `Result`:
      * `Ok(())` - Server has shut down
      * `SetupError(tonic::transport::Error)` - Server failed to start
@@ -102,14 +100,6 @@ impl RisDbSetup for RisDb {
         let raft = RaftImpl::new(addr);
         let risdb = RisDbImpl::new(addr);
 
-        // Add a dummy value to the start of the log that should NEVER actually be applied. But starting from
-        // 0 causes problems cause last applied and commit index also start at 0
-        raft.state.raft_data.lock().await.log.push(LogEntry {
-            log_action: LogAction::Noop.into(),
-            value: None,
-            term: -1
-        });
-
         let heartbeat_peer_connections = raft.peer_connections.clone();
         let heartbeat_raft_state = raft.state.clone();
         let heartbeat_volativle_raft_state = raft.volatile_state.clone();
@@ -119,8 +109,8 @@ impl RisDbSetup for RisDb {
 
         let loopback_raft_client = risdb.raft_client.clone();
 
-        // Starts the server and a "setup" thread to run simultaneously. 
-        // NOTE: Task are spawned manually so that an error can have ::from() called to map to 
+        // Starts the server and a "setup" thread to run simultaneously.
+        // NOTE: Task are spawned manually so that an error can have ::from() called to map to
         // a StartUpError.
         // TODO: Clean this up or abstract it into its own function
         let serve_wrapper_handle = tokio::spawn(
