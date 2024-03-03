@@ -4,36 +4,36 @@ package risdb;
 import "shared.proto";
 
 service RisDb {
-    rpc Put (PutRequest) returns (PutResponse);
-    rpc Get (GetRequest) returns (GetResponse);
+  rpc Put (PutRequest) returns (PutResponse);
+  rpc Get (GetRequest) returns (GetResponse);
 }
 
 message PutRequest {
-    // request id
-    string requestId = 1;
-    // Values to put
-    repeated shared.Value values = 2;
+  // request id
+  string request_id = 1;
+  // Values to put
+  repeated shared.Value values = 2;
 }
 
 message PutResponse {
-    // request id
-    string requestId = 1;
-    // boolean representing success or failure (TODO: Consider if this should be extended in the future)
-    bool success = 2; 
+  // request id
+  string request_id = 1;
+  // boolean representing success or failure
+  bool success = 2;
 }
 
 message GetRequest {
-    // request id
-    string requestId = 1;
-    // Values to put
-    repeated string keys = 2;
+  // request id
+  string request_id = 1;
+  // Values to put
+  repeated string keys = 2;
 }
 
 message GetResponse {
-    // request id
-    string requestId = 1;
-    // boolean representing success or failure (TODO: Consider if this should be extended in the future)
-    bool success = 2; 
-    /// Values being returned
-    repeated shared.Value values = 3;
+  // request id
+  string request_id = 1;
+  // boolean representing success or failure
+  bool success = 2;
+  /// Values being returned
+  repeated shared.Value values = 3;
 }

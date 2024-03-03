@@ -6,106 +6,107 @@ import "shared.proto";
 // Raft paper being used as reference: https://raft.github.io/raft.pdf
 
 service RaftInternal {
-    // TODO: Flesh out this API 
-    rpc ProposeValue (ProposeValueInput) returns (ProposeValueOutput);
-    rpc GetValue (GetValueInput) returns (GetValueOutput);
+  // TODO: Flesh out this API
+  rpc ProposeValue (ProposeValueInput) returns (ProposeValueOutput);
+  rpc GetValue (GetValueInput) returns (GetValueOutput);
 
-    rpc RequestVote (RequestVoteInput) returns (RequestVoteOutput);
-    rpc AppendEntries (AppendEntriesInput) returns (AppendEntriesOutput);
-    rpc Ping (PingInput) returns (PingOutput);
+  rpc RequestVote (RequestVoteInput) returns (RequestVoteOutput);
+  rpc AppendEntries (AppendEntriesInput) returns (AppendEntriesOutput);
+  rpc Ping (PingInput) returns (PingOutput);
 }
 
 /** Client Interactions **/
 
 message ProposeValueInput {
-    // Values to put
-    repeated shared.Value values = 1;
-    // Request ID propagated through from RisDb
-    string requestId = 2;
+  // Values to put
+  repeated shared.Value values = 1;
+  // Request ID propagated through from RisDb
+  string request_id = 2;
 }
 
 message ProposeValueOutput {
-    // Returns success of the request
-    bool successful = 1;
-    // Request ID propagated through from RisDb
-    string requestId = 2;
+  // Returns success of the request
+  bool successful = 1;
+  // Request ID propagated through from RisDb
+  string request_id = 2;
 }
 
 message GetValueInput {
-    // Values to get
-    repeated string keys = 1;
-    // Request ID propagated through from RisDb
-    string requestId = 2;
+  // Values to get
+  repeated string keys = 1;
+  // Request ID propagated through from RisDb
+  string request_id = 2;
 }
 
 message GetValueOutput {
-    // Returns success of the request
-    repeated shared.Value values = 1;
-    // Request ID propagated through from RisDb
-    string requestId = 2;
+  // Returns success of the request
+  repeated shared.Value values = 1;
+  // Request ID propagated through from RisDb
+  string request_id = 2;
 }
 
 /** Raft Interactions **/
 
 message RequestVoteInput {
-    // Term of the candidate requesting votes
-    int64 term = 1;
-    // ID of the candidate requesting votes
-    string candidateId = 2;
-    // Index of the candidates last log entry
-    int64 lastLogIndex = 3;
-    // Term of the candidates last log entry
-    int64 lastLogTerm = 4;
+  // Term of the candidate requesting votes
+  int64 term = 1;
+  // ID of the candidate requesting votes
+  string candidate_id = 2;
+  // Index of the candidates last log entry
+  int64 last_log_index = 3;
+  // Term of the candidates last log entry
+  int64 last_log_term = 4;
 }
 
 message RequestVoteOutput {
-    // currentTerm for the node returning its vote
-    int64 term = 1;
-    // True if voted "yes", False if voted "no"
-    bool voteGranted = 2;
+  // currentTerm for the node returning its vote
+  int64 term = 1;
+  // True if voted "yes", False if voted "no"
+  bool vote_granted = 2;
 }
 
 message LogEntry {
-    enum LogAction {
-        PUT = 0;
-        DELETE = 1;
-        NOOP = 2;
-    }
-    LogAction logAction = 1;
-    shared.Value value = 2;
-    int64 term = 3;
+  enum LogAction {
+    PUT = 0;
+    DELETE = 1;
+    NOOP = 2;
+  }
+  LogAction log_action = 1;
+  shared.Value value = 2;
+  int64 term = 3;
 }
 
 message AppendEntriesInput {
-    reserved 1;
-    // Id of the leader making an AppendEntries request
-    string leaderId = 4;
-    // Term of the leader making an AppendEntries request
-    int64 term = 2;
-    // Set of entries attempting to be added
-    repeated LogEntry entries = 3;
-    // Log index of previous entry
-    int64 prevLogIndex = 5;
-    // Term of the previous log entry
-    int64 prevLogTerm = 6;
-    // Commit index of the current leader
-    int64 leaderCommit = 7;
+  reserved 1;
+  // Id of the leader making an AppendEntries request
+  string leader_id = 4;
+  // Term of the leader making an AppendEntries request
+  int64 term = 2;
+  // Set of entries attempting to be added
+  repeated LogEntry entries = 3;
+  // Log index of previous entry
+  int64 prev_log_index = 5;
+  // Term of the previous log entry
+  int64 prev_log_term = 6;
+  // Commit index of the current leader
+  int64 leader_commit = 7;
 }
 
 message AppendEntriesOutput {
-    // Term for leader to update with
-    int64 term = 1;
-    // If the response was successful or not TODO: Add more details to what that actually means
-    bool success = 2;
+  // Term for leader to update with
+  int64 term = 1;
+  // If the response was successful or not
+  // TODO: Add more details to what that actually means
+  bool success = 2;
 }
 
 message PingInput {
-    // Port of the requester
-    string requester = 1;
+  // Port of the requester
+  string requester = 1;
 }
 
 message PingOutput {
-    // Port of the repsonsder
-    string responder = 1;
+  // Port of the repsonsder
+  string responder = 1;
 }
 
