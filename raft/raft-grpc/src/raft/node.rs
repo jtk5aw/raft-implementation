@@ -244,15 +244,26 @@ impl RaftImpl {
 
         // Attempt to create all connections
         for peer_addr in peers {
-            match peer_connections.handle_client_connection(addr, peer_addr.to_string()).await {
-                Ok(_) => {
-                    tracing::info!("Successfully connected to peer");
-                },
-                Err(err) => {
-                    tracing::error!("Failed to connect to peer: {:?}", err);
-                    error_vec.push(peer_addr.to_string());
-                }
-            };
+            let mut attempt = 0;
+
+            while attempt < 10 {
+                match peer_connections.handle_client_connection(addr, peer_addr.to_string()).await {
+                    Ok(_) => {
+                        tracing::info!("Successfully connected to peer");
+                        break;
+                    },
+                    Err(err) => {
+                        tracing::warn!(peer_addr, attempt, "Failed to connect: {:?}", err);
+                        attempt += 1;
+                        tracing::warn!("Sleep for 5 seconds ...");
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                };
+            }
+
+            if attempt == 10 {
+                error_vec.push(peer_addr.to_string());
+            }
         }
 
         // Return list of errored connections
