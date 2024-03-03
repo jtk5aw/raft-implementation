@@ -8,19 +8,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     setup_tracing()?;
 
-    // I don't think this will be forever but for now it lets multiple servers run 
+    // I don't think this will be forever but for now it lets multiple servers run
     // on local-host
     let args: Vec<_> = env::args().collect();
 
     let my_addr_unparsed = args.get(1).unwrap();
-    let client_addr = args.get(2).unwrap();
-    let client_addr_2 = args.get(3).unwrap(); // quick spot check shows this can work. Left out for the time being
-    
+    let peer_addrs: Vec<String> = args[2..].into();
+
+
     let addr: SocketAddr = my_addr_unparsed.parse()?;
     let ris_db = RisDb { };
 
-    let _ = ris_db.startup(addr, vec![client_addr.to_owned(), client_addr_2.to_owned()]).await;
-    
+    let _ = ris_db.startup(addr, peer_addrs).await;
+
     Ok(())
 }
 
