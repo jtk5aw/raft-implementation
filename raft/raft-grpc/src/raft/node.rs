@@ -11,7 +11,6 @@ use tonic::{Request, Response, Status};
 use crate::raft::data_store::{DataStore, StateMachine};
 use crate::raft::peer::{PeerConnections, PeerSetup, StateMachineError, LeaderActions, CandidateActions};
 use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState, RaftNodeType};
-use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
@@ -245,19 +244,15 @@ impl RaftImpl {
 
         // Attempt to create all connections
         for peer_addr in peers {
-            let result = RaftInternalClient::connect(
-                peer_addr.to_string()
-            ).await;
-
-            match result {
-                Ok(client) => peer_connections.handle_client_connection(
-                    addr, peer_addr.to_string(), client
-                ).await,
+            match peer_connections.handle_client_connection(addr, peer_addr.to_string()).await {
+                Ok(_) => {
+                    tracing::info!("Successfully connected to peer");
+                },
                 Err(err) => {
-                    tracing::error!(%err, "Error connecting to peer");
+                    tracing::error!("Failed to connect to peer: {:?}", err);
                     error_vec.push(peer_addr.to_string());
                 }
-            }
+            };
         }
 
         // Return list of errored connections

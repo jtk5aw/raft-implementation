@@ -13,6 +13,25 @@ use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
 
 // Errors
 #[derive(Debug)]
+pub enum PeerError {
+    FailedToConnect(tonic::transport::Error),
+    FailedToPing(tonic::Status),
+}
+
+impl From<tonic::transport::Error> for PeerError {
+    fn from(err: tonic::transport::Error) -> PeerError {
+        PeerError::FailedToConnect(err)
+    }
+}
+
+impl From<tonic::Status> for PeerError {
+    fn from(err: tonic::Status) -> PeerError {
+        PeerError::FailedToPing(err)
+    }
+}
+
+
+#[derive(Debug)]
 pub enum LeaderError {
     NoLeaderStateFound(String),
     NoMinimumPeerCommitIndexFound(String),
@@ -74,9 +93,8 @@ pub trait PeerSetup {
     async fn handle_client_connection(
         &self,
         addr: SocketAddr,
-        peer_port: String,
-        client: RaftInternalClient<Channel>,
-    ) -> ();
+        peer_addr: String,
+    ) -> Result<(), PeerError>;
 }
 
 // Implementations
@@ -89,28 +107,118 @@ impl PeerSetup for PeerConnections {
         &self,
         addr: SocketAddr,
         peer_addr: String,
-        mut client: RaftInternalClient<Channel>,
-    ) -> () {
+    ) -> Result<(), PeerError> {
+        let mut client = RaftInternalClient::connect(
+            peer_addr.to_string()
+        ).await?;
+
         let request = Request::new(PingInput {
             requester: addr.port().to_string(),
         });
 
-        let response = client.ping(request).await;
+        let response = client.ping(request).await?;
 
         tracing::info!(?response, "RESPONSE");
 
-        {
-            let mut peers = self.peers.lock().await;
-            peers.insert(
-                peer_addr,
-                PeerData {
-                    connection: Some(client),
-                    leader_state: Some(RaftLeaderState {
-                        next_index: 1,
-                        match_index: 0,
-                    }),
-                });
-        }
+        let mut peers = self.peers.lock().await;
+        peers.insert(
+            peer_addr,
+            PeerData {
+                connection: Some(client),
+                leader_state: Some(RaftLeaderState {
+                    next_index: 1,
+                    match_index: 0,
+                }),
+            }
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod peer_setup_tests {
+    use tokio::{sync::OnceCell, time::sleep};
+    use tonic::transport::Server;
+
+    use crate::{raft_grpc::raft_internal_server::RaftInternalServer, raft::node::RaftImpl};
+
+    use super::*;
+
+    static SERVER: OnceCell<()> = OnceCell::const_new();
+
+    async fn bootstrap_server() -> () {
+        let peer_addr = "[::1]:50052".parse().unwrap();
+        tracing::info!("Starting server on {}", peer_addr);
+
+        tokio::spawn(async move {
+            let _ = Server::builder()
+                .add_service(RaftInternalServer::new(RaftImpl::new(peer_addr)))
+                .serve(peer_addr)
+                .await;
+        });
+
+        let _ = sleep(Duration::from_millis(100)).await;
+        tracing::info!("Server started on {}", peer_addr);
+    }
+
+    async fn start_server() -> &'static () {
+        SERVER.get_or_init(bootstrap_server).await
+    }
+
+    #[tokio::test]
+    async fn successful_handle_client_connection() {
+        let addr = "[::1]:50051".parse().unwrap();
+        let peer_addr_with_scheme = "https://[::1]:50052".to_string();
+
+        start_server().await;
+
+        let peer_connections = PeerConnections {
+            peers: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let result = peer_connections.handle_client_connection(
+            addr,
+            peer_addr_with_scheme.to_owned()
+        ).await;
+
+        let peers = peer_connections.peers.lock().await;
+        assert!(
+            result.is_ok(),
+            "Peer connection request should be succesful: {:?}",
+            result,
+        );
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers.get(&peer_addr_with_scheme).unwrap().connection.is_some(), true);
+    }
+
+    #[tokio::test]
+    async fn failure_wrong_port_handle_client_connection() {
+        let addr = "[::1]:50051".parse().unwrap();
+        let wrong_peer_addr_with_scheme = "https://[::1]:50053".to_string();
+
+        start_server().await;
+
+        let peer_connections = PeerConnections {
+            peers: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let result = peer_connections.handle_client_connection(
+            addr,
+            wrong_peer_addr_with_scheme.to_owned()
+        ).await;
+
+        assert!(
+            result.is_err(),
+            "Peer connection request should fail: {:?}",
+            result,
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PeerError::FailedToConnect(_)),
+            "Should fail to connect at all since its the wrong port: {:?}",
+            err,
+        );
     }
 }
 
@@ -136,7 +244,7 @@ pub trait LeaderActions {
     /**
      * Makes requests to all peers and track how many succeed.
      *
-     * Returns: 
+     * Returns:
      * ProposeToPeersResult: Object containing both the number of peers that were successfully communicated to
      * and the results of communicating to every peer. Both in successful and unsuccessful cases.
      */
@@ -341,8 +449,8 @@ impl LeaderActions for PeerConnections {
         // and if the timing is unlucky they will just both keep sending requests to each other
         // and nothing will happen cause the request will always time out because it holds the lock on its
         // own state
-        // Simple fix is adding jitter to the below retries to prevent this. Don't know a good way 
-        // to test this at the moment though. 
+        // Simple fix is adding jitter to the below retries to prevent this. Don't know a good way
+        // to test this at the moment though.
 
         // Make request to append entries
         tracing::info!("Append entires to {:?} until it is caught up", peer_addr);
@@ -402,8 +510,8 @@ pub trait CandidateActions {
     /**
      * Requests votes from peers. Asynchronous calls to all peers are made. Tallies up results and determines
      * if the election was won or lost
-     * 
-     * Returns: 
+     *
+     * Returns:
      * RequestVotesResult: Result of the election
      */
     async fn request_votes(
@@ -413,11 +521,11 @@ pub trait CandidateActions {
     ) -> RequestVotesResult;
 
     /**
-     * Makes a request for vote in election to make this node leader to one peer. 
-     * 
-     * Returns: 
+     * Makes a request for vote in election to make this node leader to one peer.
+     *
+     * Returns:
      * Ok(bool): True if peer voted for this node. False if not
-     * Err(CandidateError): Reason that request to this peer failed. 
+     * Err(CandidateError): Reason that request to this peer failed.
      */
     async fn request_vote_from_peer(
         &self,
@@ -428,9 +536,9 @@ pub trait CandidateActions {
     ) -> Result<bool, CandidateError>;
 
     /**
-     * Determine if the current node received enough yes votes to become the new leader. 
-     * 
-     * Returns: 
+     * Determine if the current node received enough yes votes to become the new leader.
+     *
+     * Returns:
      * bool: True if this node should convert to leader. False if not
      */
     async fn determine_election_result(
@@ -455,9 +563,9 @@ impl CandidateActions for PeerConnections {
                 .deref_mut()
                 .iter_mut()
                 .map(|(peer_addr, peer_data)| self.request_vote_from_peer(
-                    addr.to_owned(), 
-                    peer_addr.to_owned(), 
-                    peer_data, 
+                    addr.to_owned(),
+                    peer_addr.to_owned(),
+                    peer_data,
                     raft_stable_data
                 ))
             ).await
