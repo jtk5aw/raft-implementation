@@ -1,22 +1,10 @@
-// Copyright 2024 Cloudflare, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use async_trait::async_trait;
-use log::info;
-use std::sync::Mutex;
+use log::{error, info};
+use pingora_load_balancing::{health_check, selection::RoundRobin, LoadBalancer};
+use std::{net::SocketAddr, sync::{Arc, Mutex}, time::Duration};
 use structopt::StructOpt;
 
+use pingora::{listeners::TcpSocketOptions, services::{background::background_service, listening::Service as ListeningService}};
 use pingora_core::server::configuration::Opt;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -78,6 +66,66 @@ impl ProxyHttp for MyProxy {
     }
 }
 
+pub struct MyRoundRobinLB {
+    lb: Arc<LoadBalancer<RoundRobin>>,
+    tls: bool,
+    sni: String
+}
+
+impl MyRoundRobinLB {
+    fn new(addrs: Vec<&str>, tls: bool, sni: String) -> Self {
+        let mut lb = LoadBalancer::try_from_iter(addrs).unwrap();
+
+        // We add health check in the background so that the bad server is never selected.
+        let hc = health_check::TcpHealthCheck::new();
+        lb.set_health_check(hc);
+        lb.health_check_frequency = Some(Duration::from_secs(1));
+
+        let background = background_service("health check", lb);
+
+        let lb: Arc<LoadBalancer<RoundRobin>> = background.task();
+
+        MyRoundRobinLB {
+            lb,
+            tls,
+            sni
+        }
+    }
+}
+
+#[async_trait]
+impl ProxyHttp for MyRoundRobinLB {
+    type CTX = ();
+    fn new_ctx(&self) -> Self::CTX {}
+
+    async fn upstream_peer(&self, _session: &mut Session, _ctx: &mut ()) -> Result<Box<HttpPeer>> {
+        info!("Starting upstream peer...");
+
+        let upstream = self.lb
+            .select(b"", 256) // hash doesn't matter
+            .unwrap();
+
+        info!("upstream peer is: {:?}", upstream);
+
+        let peer = Box::new(HttpPeer::new(upstream, self.tls, self.sni.to_owned()));
+        Ok(peer)
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut pingora_http::RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        upstream_request
+            .insert_header("Host", "one.one.one.one")
+            .unwrap();
+        Ok(())
+    }
+}
+
+pub struct LB(Arc<LoadBalancer<RoundRobin>>);
+
 // RUST_LOG=INFO cargo run
 // I changed it slightly so that it proxies to my website instead of to two different cloudflare websites
 // curl 127.0.0.1:6190 -H "Host: jtken.com"
@@ -90,14 +138,25 @@ fn main() {
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 
+    let lb = MyRoundRobinLB::new(
+        vec![
+            "1.1.1.1:443", "1.0.0.1:443"
+        ],
+        true,
+        "one.one.one.one".to_string()
+    );
+
     let mut my_proxy = pingora_proxy::http_proxy_service(
         &my_server.configuration,
-        MyProxy {
-            beta_counter: Mutex::new(0),
-        },
+        lb
     );
-    my_proxy.add_tcp("0.0.0.0:6190");
+    my_proxy.add_tcp_with_settings("[::1]:6190", TcpSocketOptions { ipv6_only: true });
+
+    // TODO: Set up some metrics on this cause it seems neat
+    let mut prometheus_service_http = ListeningService::prometheus_http_service();
+    prometheus_service_http.add_tcp("127.0.0.1:6150");
 
     my_server.add_service(my_proxy);
+    my_server.add_service(prometheus_service_http);
     my_server.run_forever();
 }
