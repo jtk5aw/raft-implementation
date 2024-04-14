@@ -1,162 +1,201 @@
 use async_trait::async_trait;
-use log::{error, info};
-use pingora_load_balancing::{health_check, selection::RoundRobin, LoadBalancer};
-use std::{net::SocketAddr, sync::{Arc, Mutex}, time::Duration};
+use log::info;
+use pingora::{apps::ServerApp, connectors::TransportConnector, listeners::{Listeners, TlsSettings}, protocols::Stream, server::{configuration::Opt, Server, ShutdownWatch}, services::{listening::Service, Service as OtherService}, upstreams::peer::{BasicPeer, HttpPeer}};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use structopt::StructOpt;
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, select};
+use std::{fs::{create_dir_all, File}, io::Write, sync::Arc};
+use pingora_core::protocols::ALPN;
+use pingora_core::upstreams::peer::Peer;
 
-use pingora::{listeners::TcpSocketOptions, services::{background::background_service, listening::Service as ListeningService}};
-use pingora_core::server::configuration::Opt;
-use pingora_core::server::Server;
-use pingora_core::upstreams::peer::HttpPeer;
-use pingora_core::Result;
-use pingora_proxy::{ProxyHttp, Session};
-
-// global counter
-static REQ_COUNTER: Mutex<usize> = Mutex::new(0);
-
-pub struct MyProxy {
-    // counter for the service
-    beta_counter: Mutex<usize>, // AtomicUsize works too
+pub struct ProxyApp {
+    client_connector: TransportConnector,
+    proxy_to: HttpPeer,
 }
 
-pub struct MyCtx {
-    beta_user: bool,
+enum DuplexEvent {
+    DownstreamRead(usize),
+    UpstreamRead(usize),
 }
 
-fn check_beta_user(req: &pingora_http::RequestHeader) -> bool {
-    // some simple logic to check if user is beta
-    req.headers.get("beta-flag").is_some()
-}
-
-#[async_trait]
-impl ProxyHttp for MyProxy {
-    type CTX = MyCtx;
-    fn new_ctx(&self) -> Self::CTX {
-        MyCtx { beta_user: false }
+impl ProxyApp {
+    pub fn new(proxy_to: HttpPeer) -> Self {
+        ProxyApp {
+            client_connector: TransportConnector::new(None),
+            proxy_to,
+        }
     }
 
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        ctx.beta_user = check_beta_user(session.req_header());
-        Ok(false)
-    }
-
-    async fn upstream_peer(
-        &self,
-        _session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        let mut req_counter = REQ_COUNTER.lock().unwrap();
-        *req_counter += 1;
-
-        let peer = if ctx.beta_user {
-            let mut beta_count = self.beta_counter.lock().unwrap();
-            *beta_count += 1;
-            info!("I'm a beta user #{beta_count}");
-            let addr = ("1.0.0.1", 443);
-
-            Box::new(HttpPeer::new(addr, true, "one.one.one.one".to_string()))
-        } else {
-            info!("I'm an user #{req_counter}");
-            let addr = ("blog.jtken.com", 443);
-
-            Box::new(HttpPeer::new(addr, true, "jtken.com".to_string()))
-        };
-
-        Ok(peer)
-    }
-}
-
-pub struct MyRoundRobinLB {
-    lb: Arc<LoadBalancer<RoundRobin>>,
-    tls: bool,
-    sni: String
-}
-
-impl MyRoundRobinLB {
-    fn new(addrs: Vec<&str>, tls: bool, sni: String) -> Self {
-        let mut lb = LoadBalancer::try_from_iter(addrs).unwrap();
-
-        // We add health check in the background so that the bad server is never selected.
-        let hc = health_check::TcpHealthCheck::new();
-        lb.set_health_check(hc);
-        lb.health_check_frequency = Some(Duration::from_secs(1));
-
-        let background = background_service("health check", lb);
-
-        let lb: Arc<LoadBalancer<RoundRobin>> = background.task();
-
-        MyRoundRobinLB {
-            lb,
-            tls,
-            sni
+    async fn duplex(&self, mut server_session: Stream, mut client_session: Stream) -> Option<Stream> {
+        let mut upstream_buf = [0; 1024];
+        let mut downstream_buf = [0; 1024];
+        loop {
+            let downstream_read = server_session.read(&mut upstream_buf);
+            let upstream_read = client_session.read(&mut downstream_buf);
+            let event: DuplexEvent;
+            select! {
+                n = downstream_read => {
+                    if n.is_err() {
+                        continue;
+                    }
+                    event = DuplexEvent::DownstreamRead(n.unwrap())
+                },
+                n = upstream_read => {
+                    event = DuplexEvent::UpstreamRead(n.unwrap())
+                },
+            }
+            match event {
+                DuplexEvent::DownstreamRead(0) => {
+                    info!("downstream session closing");
+                    return None;
+                }
+                DuplexEvent::UpstreamRead(0) => {
+                    info!("upstream session closing");
+                    return None;
+                }
+                DuplexEvent::DownstreamRead(n) => {
+                    client_session.write_all(&upstream_buf[0..n]).await.unwrap();
+                    client_session.flush().await.unwrap();
+                }
+                DuplexEvent::UpstreamRead(n) => {
+                    server_session
+                        .write_all(&downstream_buf[0..n])
+                        .await
+                        .unwrap();
+                    server_session.flush().await.unwrap();
+                }
+            }
         }
     }
 }
 
+
 #[async_trait]
-impl ProxyHttp for MyRoundRobinLB {
-    type CTX = ();
-    fn new_ctx(&self) -> Self::CTX {}
+impl ServerApp for ProxyApp {
+    async fn process_new(
+        self: &Arc<Self>,
+        io: Stream,
+        _shutdown: &ShutdownWatch,
+    ) -> Option<Stream> {
+        let reused_session = self.client_connector
+            .reused_stream(&self.proxy_to)
+            .await;
 
-    async fn upstream_peer(&self, _session: &mut Session, _ctx: &mut ()) -> Result<Box<HttpPeer>> {
-        info!("Starting upstream peer...");
+        match reused_session {
+            Some(client_session) => {
+                info!("Reusing a connection");
+                return self.duplex(io, client_session).await;
+            }
+            None => {
+                info!("No session to re-use");
+            }
+        }
 
-        let upstream = self.lb
-            .select(b"", 256) // hash doesn't matter
-            .unwrap();
+        let client_session = self.client_connector.new_stream(&self.proxy_to).await;
 
-        info!("upstream peer is: {:?}", upstream);
-
-        let peer = Box::new(HttpPeer::new(upstream, self.tls, self.sni.to_owned()));
-        Ok(peer)
-    }
-
-    async fn upstream_request_filter(
-        &self,
-        _session: &mut Session,
-        upstream_request: &mut pingora_http::RequestHeader,
-        _ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        upstream_request
-            .insert_header("Host", "one.one.one.one")
-            .unwrap();
-        Ok(())
+        match client_session {
+            Ok(client_session) => {
+                return self.duplex(io, client_session).await;
+            }
+            Err(e) => {
+                info!("Failed to create client session: {}", e);
+                None
+            }
+        }
     }
 }
+// This works against the gRPC server: grpcurl -import-path ~/Documents/raft-implementation/raft/raft-grpc/proto -proto risdb.proto -insecure -d '{ "keys": ["Saudi Riyal"] }' "[::1]:50051" risdb.RisDb/Get
 
-pub struct LB(Arc<LoadBalancer<RoundRobin>>);
-
-// RUST_LOG=INFO cargo run
-// I changed it slightly so that it proxies to my website instead of to two different cloudflare websites
-// curl 127.0.0.1:6190 -H "Host: jtken.com"
-// curl 127.0.0.1:6190 -H "Host: one.one.one.one" -H "beta-flag: 1"
-fn main() {
+// TODO TODO TODO: This works as a proxy when using grpcurl and using kreya. Both ahve to operate in "insecure" mode though
+// as the root authority for the certs can't be trusted (since its just self signed).
+// It says downstream which to me implies the client to the proxy server is where the issue is but I
+// can't confirm. But moral of the story it works for tcp and some for TLS but a raft client can't connect via TLS so
+// that needs to be sorted
+fn main() -> std::io::Result<()> {
     env_logger::init();
 
-    // read command line arguments
-    let opt = Opt::from_args();
-    let mut my_server = Server::new(Some(opt)).unwrap();
+    let subject_alt_names = vec!["localhost".to_string()];
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names).unwrap();
+
+    let base_dir = format!("{}/certs/keys", env!("CARGO_MANIFEST_DIR"));
+    println!("{}", base_dir);
+    let cert_path = format!("{}/server.crt", base_dir);
+    let priv_key_path = format!("{}/priv.key", base_dir);
+    let pub_key_path = format!("{}/key.pem", base_dir);
+
+    create_dir_all(base_dir)?;
+    let mut cert_file = File::create(&cert_path)?;
+    cert_file.write_all(cert.pem().as_bytes())?;
+    let mut priv_key = File::create(&priv_key_path)?;
+    priv_key.write_all(key_pair.serialize_pem().as_bytes())?;
+    let mut pub_key = File::create(&pub_key_path)?;
+    pub_key.write_all(key_pair.public_key_pem().as_bytes())?;
+
+    let proxy_service = proxy_service_tcp(
+        "[::1]:6141",    // listen
+        "[::1]:50051",     // proxy to
+        "", // SNI
+    );
+    let proxy_service_ssl = proxy_service_tls(
+        "[::1]:6144",    // listen
+        "[::1]:50051",     // proxy to
+        "", // SNI
+        &cert_path,
+        &priv_key_path,
+    );
+
+
+    let opt = Some(Opt::from_args());
+    let mut my_server = Server::new(opt).unwrap();
     my_server.bootstrap();
 
-    let lb = MyRoundRobinLB::new(
-        vec![
-            "1.1.1.1:443", "1.0.0.1:443"
-        ],
-        true,
-        "one.one.one.one".to_string()
-    );
-
-    let mut my_proxy = pingora_proxy::http_proxy_service(
-        &my_server.configuration,
-        lb
-    );
-    my_proxy.add_tcp_with_settings("[::1]:6190", TcpSocketOptions { ipv6_only: true });
-
-    // TODO: Set up some metrics on this cause it seems neat
-    let mut prometheus_service_http = ListeningService::prometheus_http_service();
-    prometheus_service_http.add_tcp("127.0.0.1:6150");
-
-    my_server.add_service(my_proxy);
-    my_server.add_service(prometheus_service_http);
+    let services: Vec<Box<dyn OtherService>> = vec![
+        Box::new(proxy_service),
+        Box::new(proxy_service_ssl),
+    ];
+    my_server.add_services(services);
     my_server.run_forever();
+
+    Ok(())
+}
+
+fn proxy_service_tcp(
+    addr: &str,
+    proxy_addr: &str,
+    proxy_sni: &str
+) -> Service<ProxyApp> {
+    let mut proxy_to = HttpPeer::new(proxy_addr, false, "".to_string());
+    // set SNI to enable TLS
+    proxy_to.sni = proxy_sni.into();
+    Service::with_listeners(
+        "Proxy Service TCP".to_string(),
+        Listeners::tcp(addr),
+        Arc::new(ProxyApp::new(proxy_to)),
+    )
+}
+
+fn proxy_service_tls(
+    addr: &str,
+    proxy_addr: &str,
+    proxy_sni: &str,
+    cert_path: &str,
+    key_path: &str,
+) -> Service<ProxyApp> {
+    let mut proxy_to = HttpPeer::new(proxy_addr, false, "".to_string());
+    // set SNI to enable TLS
+    proxy_to.sni = proxy_sni.into();
+    proxy_to.get_mut_peer_options().unwrap().alpn = ALPN::H2;
+
+    let mut tls_settings = TlsSettings::intermediate(cert_path, key_path).unwrap();
+    tls_settings.enable_h2();
+
+    let mut listeners = Listeners::new();
+    listeners.add_tls_with_settings(addr, None, tls_settings);
+
+    let service = Service::with_listeners(
+        "Proxy Service TLS".to_string(),
+        listeners,
+        Arc::new(ProxyApp::new(proxy_to)),
+    );
+    service
 }

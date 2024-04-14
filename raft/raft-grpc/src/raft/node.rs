@@ -383,6 +383,8 @@ impl FollowerActions for RaftImpl {
 // TODO: Add redirects to the writer. For now assumes that the outside client will only make put requests to the
 // writer. Which make not be true
 // TODO: Add support for other operations when writing to the log.
+// TODO: Make almost all of these logs be debug instead of INFO. Have like 1-2 info logs per request and that's it cause right now its waaaaaay
+// too much in the default case.
 #[tonic::async_trait]
 impl RaftInternal for RaftImpl {
     // TODO: Return a status error when maybe it makes more sense to return Ok with success: false?

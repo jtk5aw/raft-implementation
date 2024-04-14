@@ -5,3 +5,6 @@ members = [
     "risdb",
     "risdb-proxy"
 ]
+
+[workspace.dependencies]
+tokio = "1"

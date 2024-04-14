@@ -1,12 +1,40 @@
+use std::fs::{create_dir_all, File};
+use std::io::{Write, Error as IoError};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use hyper::server::conn::Http;
+use tower_http::ServiceBuilderExt;
 use tokio::{try_join, task::JoinHandle};
-use tonic::transport::Server;
+use tokio::net::TcpListener;
+use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tokio_rustls::rustls::{Error as RustTlsError};
+use tokio_rustls::TlsAcceptor;
 
 use crate::raft::node::{RaftImpl, HeartbeatError, SetupError};
 use crate::raft_grpc::raft_internal_server::RaftInternalServer;
 use crate::risdb::ris_db_server::RisDbServer;
 use crate::risdb_impl::{RisDbImpl, RisDbSetupError};
+
+#[derive(Debug)]
+pub struct ServerArgs {
+    pub addr: SocketAddr,
+    pub key_dir: String,
+    pub peer_args: Vec<PeerArgs>
+}
+
+#[derive(Debug)]
+pub struct PeerArgs {
+    pub addr: String,
+    pub key_dir: String
+}
+
+#[derive(Debug)]
+struct ConnInfo {
+    addr: SocketAddr,
+    certificates: Vec<Certificate>,
+}
 
 // Errors
 pub enum StartUpError {
@@ -14,6 +42,8 @@ pub enum StartUpError {
     FailedToStartServer(tonic::transport::Error),
     FailedToLocallyConnect(RisDbSetupError),
     FailedToHeartbeat(HeartbeatError),
+    FailedToReadSelfSignedCert(IoError),
+    FailedToSetUpTls(RustTlsError),
     CustomError(String),
 }
 
@@ -40,6 +70,19 @@ impl From<HeartbeatError> for StartUpError {
         StartUpError::FailedToHeartbeat(err)
     }
 }
+
+impl From<IoError> for StartUpError {
+    fn from(err: IoError) -> StartUpError {
+        StartUpError::FailedToReadSelfSignedCert(err)
+    }
+}
+
+impl From<RustTlsError> for StartUpError {
+    fn from(err: RustTlsError) -> StartUpError {
+        StartUpError::FailedToSetUpTls(err)
+    }
+}
+
 
 impl From<String> for StartUpError {
     fn from(err: String) -> StartUpError {
@@ -68,8 +111,7 @@ pub trait RisDbSetup {
      */
     async fn startup(
         self,
-        addr: SocketAddr,
-        peers: Vec<String>
+        server_args: ServerArgs
     ) -> Result<(), Vec<String>>;
 
     /**
@@ -84,6 +126,7 @@ pub trait RisDbSetup {
         self,
         raft: RaftImpl,
         risdb: RisDbImpl,
+        key_dir: String,
     ) -> Result<(), StartUpError>;
 
 }
@@ -93,12 +136,11 @@ impl RisDbSetup for RisDb {
     #[tracing::instrument]
     async fn startup(
         self,
-        addr: SocketAddr,
-        peers: Vec<String>
+        server_args: ServerArgs
     ) -> Result<(), Vec<String>> {
 
-        let raft = RaftImpl::new(addr);
-        let risdb = RisDbImpl::new(addr);
+        let raft = RaftImpl::new(server_args.addr);
+        let risdb = RisDbImpl::new(server_args.addr);
 
         let heartbeat_peer_connections = raft.peer_connections.clone();
         let heartbeat_raft_state = raft.state.clone();
@@ -117,18 +159,22 @@ impl RisDbSetup for RisDb {
             self.serve_wrapper(
                 raft,
                 risdb,
+                server_args.key_dir,
             )
         );
         let heartbeat_handle = tokio::spawn(
             RaftImpl::heartbeat(
-                addr.to_string(),
+                server_args.addr.to_string(),
                 heartbeat_peer_connections,
                 heartbeat_raft_state,
                 heartbeat_volativle_raft_state,
             )
         );
+        let peers = server_args.peer_args.iter()
+            .map(|peer_arg| peer_arg.addr.to_string())
+            .collect();
         let peer_connections_handle = tokio::spawn(
-            RaftImpl::connect_to_peers(addr,
+            RaftImpl::connect_to_peers(server_args.addr,
                 peers,
                 connect_to_peers_peer_connections,
                 connect_to_peers_raft_stable_state
@@ -136,7 +182,7 @@ impl RisDbSetup for RisDb {
         );
         let loopback_connect_handle = tokio::spawn(
             loopback_raft_client.init_client(
-                addr
+                server_args.addr
             )
         );
 
@@ -165,7 +211,13 @@ impl RisDbSetup for RisDb {
                 },
                 StartUpError::CustomError(err) => {
                     tracing::error!("Most likely a concurrency issue: {:?}", err);
-                }
+                },
+                StartUpError::FailedToReadSelfSignedCert(err) => {
+                    tracing::error!("Failed to read a self signed cert to be used for TLS: {:?}" , err);
+                },
+                StartUpError::FailedToSetUpTls(err) => {
+                    tracing::error!("Failed to setup TLS: {:?}" , err);
+                },
             }
         }
 
@@ -176,17 +228,81 @@ impl RisDbSetup for RisDb {
         self,
         raft: RaftImpl,
         risdb: RisDbImpl,
+        key_dir: String,
     ) -> Result<(), StartUpError> {
         // TODO: This feels odd, shouldn't need to do this
         let addr = raft.addr.clone();
 
-        let _ = Server::builder()
-            .add_service(RaftInternalServer::new(raft))
-            .add_service(RisDbServer::new(risdb))
-            .serve(addr)
-            .await?;
+        let certs = {
+            let fd = std::fs::File::open(format!("{}/{}", key_dir, "server.crt"))?;
+            let mut buf = std::io::BufReader::new(&fd);
+            rustls_pemfile::certs(&mut buf)?
+                .into_iter()
+                .map(Certificate)
+                .collect()
+        };
+        let key = {
+            let fd = std::fs::File::open(format!("{}/{}", key_dir, "priv.key"))?;
+            let mut buf = std::io::BufReader::new(&fd);
+            rustls_pemfile::pkcs8_private_keys(&mut buf)?
+                .into_iter()
+                .map(PrivateKey)
+                .next()
+                .unwrap()
 
-        Ok(())
+        };
+
+        let mut tls = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        tls.alpn_protocols = vec![b"h2".to_vec()];
+
+        let svc = Server::builder()
+            .add_service(RisDbServer::new(risdb))
+            .add_service(RaftInternalServer::new(raft))
+            .into_service();
+
+        let mut http = Http::new();
+        http.http2_only(true);
+
+        let listener = TcpListener::bind(addr).await?;
+        let tls_acceptor = TlsAcceptor::from(Arc::new(tls));
+
+        loop {
+            let (conn, addr) = match listener.accept().await {
+                Ok(incoming) => incoming,
+                Err(e) => {
+                    eprintln!("Error accepting connection: {}", e);
+                    continue;
+                }
+            };
+
+            let http = http.clone();
+            let tls_acceptor = tls_acceptor.clone();
+            let svc = svc.clone();
+
+            tokio::spawn(async move {
+                let mut certificates = Vec::new();
+
+                let conn = tls_acceptor
+                    .accept_with(conn, |info| {
+                        if let Some(certs) = info.peer_certificates() {
+                            for cert in certs {
+                                certificates.push(cert.clone());
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap();
+
+                let svc = tower::ServiceBuilder::new()
+                    .add_extension(Arc::new(ConnInfo { addr, certificates }))
+                    .service(svc);
+
+                http.serve_connection(conn, svc).await.unwrap();
+            });
+        }
     }
 }
 

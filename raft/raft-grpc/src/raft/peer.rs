@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tonic::Request;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput};
 use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
@@ -15,12 +15,19 @@ use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
 #[derive(Debug)]
 pub enum PeerError {
     FailedToConnect(tonic::transport::Error),
+    FailedToRetrieveCert(std::io::Error),
     FailedToPing(tonic::Status),
 }
 
 impl From<tonic::transport::Error> for PeerError {
     fn from(err: tonic::transport::Error) -> PeerError {
         PeerError::FailedToConnect(err)
+    }
+}
+
+impl From<std::io::Error> for PeerError {
+    fn from(err: std::io::Error) -> PeerError {
+        PeerError::FailedToRetrieveCert(err)
     }
 }
 
