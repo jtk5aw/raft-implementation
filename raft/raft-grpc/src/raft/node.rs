@@ -14,6 +14,7 @@ use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, Raft
 use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
+use crate::server::PeerArgs;
 use crate::shared::Value;
 
 // Constants
@@ -230,7 +231,7 @@ impl RaftImpl {
     #[tracing::instrument(skip_all, ret, err(Debug))]
     pub async fn connect_to_peers(
         addr: SocketAddr,
-        peers: Vec<String>,
+        peers: Vec<PeerArgs>,
         peer_connections: PeerConnections,
         raft_stable_state: RaftStableState
     ) -> Result<(), SetupError> {
@@ -243,11 +244,13 @@ impl RaftImpl {
         sleep(Duration::from_secs(5)).await;
 
         // Attempt to create all connections
-        for peer_addr in peers {
+        for peer in peers {
+            let peer_addr = peer.addr;
+            let key_dir = peer.key_dir;
             let mut attempt = 0;
 
             while attempt < 10 {
-                match peer_connections.handle_client_connection(addr, peer_addr.to_string()).await {
+                match peer_connections.handle_client_connection(addr, peer_addr.to_string(), key_dir.clone()).await {
                     Ok(_) => {
                         tracing::info!("Successfully connected to peer");
                         break;

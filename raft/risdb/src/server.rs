@@ -1,4 +1,5 @@
 use std::{env, net::SocketAddr};
+use std::path::{Path, PathBuf};
 
 use raft_grpc::server::{PeerArgs, RisDb, RisDbSetup, ServerArgs};
 
@@ -7,9 +8,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     setup_tracing()?;
 
+    // Get workspace base
+    let output = std::process::Command::new(env!("CARGO"))
+        .arg("locate-project")
+        .arg("--workspace")
+        .arg("--message-format=plain")
+        .output()
+        .unwrap()
+        .stdout;
+    let cargo_path = Path::new(std::str::from_utf8(&output).unwrap().trim());
+    let workspace_base = cargo_path.parent().unwrap().to_path_buf();
+
     let args: Vec<_> = env::args().collect();
     let my_args = args.get(1).unwrap();
-    let server_args = parse_server_args(my_args.to_string())?;
+    let server_args = parse_server_args(workspace_base, my_args.to_string())?;
 
     let ris_db = RisDb { };
 
@@ -18,36 +30,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_server_args(arg: String) -> Result<ServerArgs, Box<dyn std::error::Error>> {
+fn parse_server_args(workspace_base: PathBuf, arg: String) -> Result<ServerArgs, Box<dyn std::error::Error>> {
     let mut pairs = arg.split(";");
 
-    let this_server_arg = pairs.next()
+    let mut this_server_arg = pairs.next()
         .ok_or_else(|| "Failed to get server arg".to_string())?
-        .split_once(',')
-        .ok_or_else(|| "Failed to split server arg".to_string())?;
-    let addr = this_server_arg.0.parse()?;
-    let key_dir = format!(
-        "{}/certs/keys_{}/",
-        env!("CARGO_MANIFEST_DIR"),
-        this_server_arg.1
-    );
+        .split(',');
+    let risdb_addr = this_server_arg.next()
+        .ok_or("Did not have risdb addr")?
+        .parse()?;
+    let raft_addr = this_server_arg.next()
+        .ok_or("Did not have raft addr")?
+        .parse()?;
+    
+    let key_dir = workspace_base
+        .join("certs")
+        .join(format!("key_{}", this_server_arg.next()
+            .ok_or("Did not have key dir")?
+        ));
 
     let peer_args = pairs
         .map(|peer_arg_str| {
             let split_peer_arg = peer_arg_str.split_once(',').unwrap();
             PeerArgs {
                 addr: split_peer_arg.0.to_string(),
-                key_dir: format!(
-                    "{}/certs/keys_{}/",
-                    env!("CARGO_MANIFEST_DIR"), // TODO TODO TODO: The problem right now is this is package specfic. Need a good way of sharing across packages. 
-                    split_peer_arg.1
-                )
+                key_dir: key_dir.join("certs").join(format!("keys_{}", split_peer_arg.1))
             }
         })
         .collect();
 
     Ok(ServerArgs {
-        addr,
+        risdb_addr,
+        raft_addr,
         key_dir,
         peer_args
     })
