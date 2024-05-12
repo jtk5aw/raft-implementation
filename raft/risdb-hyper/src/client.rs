@@ -1,14 +1,15 @@
 use std::{fs, io};
-use hyper::{Request, Uri};
+use std::path::PathBuf;
+use hyper::Request;
 use hyper::client::conn::http2::handshake;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpStream;
-use http_body_util::{BodyExt, Empty};
-use hyper::body::Bytes;
+use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncWriteExt as _};
 use serde::{Deserialize, Serialize};
+use risdb_hyper::{error, get_workspace_base_dir};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GetKeysRequest {
@@ -19,9 +20,12 @@ struct GetKeysRequest {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // This is where we will setup our HTTP client requests.
 
+    let base_dir = get_workspace_base_dir();
     // Load root cert
-    let tls = load_root_cert("/Users/jacksonkennedy/Documents/raft-implementation/raft/risdb-hyper/src/ca.cert")
-        .expect("Should create ClientConfig using provided root cert");
+    let tls = load_root_cert(&base_dir
+        .join("certs")
+        .join("ca.cert")
+    ).expect("Should create ClientConfig using provided root cert");
 
     // Parse our URL...
     let url = "https://localhost:3000/echo".parse::<hyper::Uri>()?;
@@ -111,9 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn load_root_cert(path: &str) -> Result<ClientConfig, std::io::Error> {
+fn load_root_cert(path: &PathBuf) -> Result<ClientConfig, std::io::Error> {
     let f = fs::File::open(path)
-        .map_err(|e| error(format!("failed to open {}: {}", path, e)))?;
+        .map_err(|e| error(format!("failed to open {:?}: {}", path, e)))?;
     let mut rd = io::BufReader::new(f);
 
     let certs = rustls_pemfile::certs(&mut rd).collect::<Result<Vec<_>, _>>()?;
@@ -127,10 +131,6 @@ fn load_root_cert(path: &str) -> Result<ClientConfig, std::io::Error> {
             .with_root_certificates(roots)
             .with_no_client_auth()
     )
-}
-
-fn error(err: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
 }
 
 // NOTE: This part is only needed for HTTP/2. HTTP/1 doesn't need an executor.

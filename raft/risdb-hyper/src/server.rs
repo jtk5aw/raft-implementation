@@ -1,13 +1,12 @@
-mod client;
 
 use std::{fs, io};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use http_body_util::{Empty, Full};
 use hyper::body::{Body, Bytes};
-use hyper::server::conn::http1;
 use hyper::{Request, Response, body::Incoming, service::Service};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
@@ -20,26 +19,24 @@ use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
+use risdb_hyper::{error, get_workspace_base_dir};
 
-// OpenSSL commands
-// openssl ecparam -out ec_key.pem -name prime256v1 -genkey
-// openssl req -new -sha256 -key ec_key.pem -out my.csr TODO TODO: Expand this to require no manual inputs
-// openssl x509 -req -sha256 -days 365 -in my.csr -signkey ec_key.pem -out server.crt
-
-// new commands
-// openssl ecparam -out my_ca.key -name prime256v1 -genkey
-// openssl req -x509 -new -nodes -key my_ca.key -sha256 -days 1826 -out ca.crt -subj '/CN=JacksonOrg Root CA/C=US/ST=Virginia/L=Falls Church/O=JacksonOrg'
-// openssl req -new -sha256 -key my_ca.key -out server.csr -keyout server.key -config openssl.cnf (passphrase: jackson)
-// openssl x509 -req -in server.csr -CA ca.crt -CAkey my_ca.key -CAcreateserial -out server.crt -days 730 -sha256 -extfile openssl.cnf
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from_str("[::1]:3000").expect("Provided addr should be parseable");
 
+    let base_dir = get_workspace_base_dir();
     // Load public certificate.
-    let certs = load_certs("src/sample.pem")?;
+    let certs = load_certs(&base_dir
+        .join("certs")
+        .join("sample.pem")
+    )?;
     // Load private key.
-    let key = load_private_key("src/sample.ec")?;
+    let key = load_private_key(&base_dir
+        .join("certs")
+        .join("sample.ec")
+    )?;
 
     let listener = TcpListener::bind(addr).await?;
 
@@ -84,10 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 // Load public certificate from file.
-fn load_certs(filename: &str) -> io::Result<Vec<CertificateDer<'static>>> {
+fn load_certs(filename: &PathBuf) -> io::Result<Vec<CertificateDer<'static>>> {
     // Open certificate file.
     let certfile = fs::File::open(filename)
-        .map_err(|e| error(format!("failed to open {}: {}", filename, e)))?;
+        .map_err(|e| error(format!("failed to open {:?}: {}", filename, e)))?;
     let mut reader = io::BufReader::new(certfile);
 
     // Load and return certificate.
@@ -95,18 +92,14 @@ fn load_certs(filename: &str) -> io::Result<Vec<CertificateDer<'static>>> {
 }
 
 // Load private key from file.
-fn load_private_key(filename: &str) -> io::Result<PrivateKeyDer<'static>> {
+fn load_private_key(filename: &PathBuf) -> io::Result<PrivateKeyDer<'static>> {
     // Open keyfile.
     let keyfile = fs::File::open(filename)
-        .map_err(|e| error(format!("failed to open {}: {}", filename, e)))?;
+        .map_err(|e| error(format!("failed to open {:?}: {}", filename, e)))?;
     let mut reader = io::BufReader::new(keyfile);
 
     // Load and return a single private key.
     rustls_pemfile::private_key(&mut reader).map(|key| key.unwrap())
-}
-
-fn error(err: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
 }
 
 async fn echo(
