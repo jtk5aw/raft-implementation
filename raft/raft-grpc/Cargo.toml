@@ -9,15 +9,11 @@ prost = "0.11"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tower = "0.4.13"
 tower-http = { version = "0.4", features = ["add-extension", "util"] }
-hyper = "0.14.27"
-rustls-pemfile = "2.1.2"
-tokio-rustls = { version = "0.26.0" }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 futures = "0.3"
 log = "0.4.20"
 rand = "0.8.5"
-hyper-rustls = { version = "0.27", features = ["http2"] }
 
 [build-dependencies]
 rcgen = "0.13.1"
