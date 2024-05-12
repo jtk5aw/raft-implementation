@@ -1,25 +1,55 @@
+mod client;
+
+use std::{fs, io};
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use http_body_util::{Empty, Full};
 use hyper::body::{Body, Bytes};
 use hyper::server::conn::http1;
 use hyper::{Request, Response, body::Incoming, service::Service};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
 use hyper::body::Frame;
 use hyper::{Method, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt};
+use hyper_util::server::conn::auto::Builder;
+use rustls::ServerConfig;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
 
+// OpenSSL commands
+// openssl ecparam -out ec_key.pem -name prime256v1 -genkey
+// openssl req -new -sha256 -key ec_key.pem -out my.csr TODO TODO: Expand this to require no manual inputs
+// openssl x509 -req -sha256 -days 365 -in my.csr -signkey ec_key.pem -out server.crt
+
+// new commands
+// openssl ecparam -out my_ca.key -name prime256v1 -genkey
+// openssl req -x509 -new -nodes -key my_ca.key -sha256 -days 1826 -out ca.crt -subj '/CN=JacksonOrg Root CA/C=US/ST=Virginia/L=Falls Church/O=JacksonOrg'
+// openssl req -new -sha256 -key my_ca.key -out server.csr -keyout server.key -config openssl.cnf (passphrase: jackson)
+// openssl x509 -req -in server.csr -CA ca.crt -CAkey my_ca.key -CAcreateserial -out server.crt -days 730 -sha256 -extfile openssl.cnf
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from_str("[::1]:3000").expect("Provided addr should be parseable");
 
-    // We create a TcpListener and bind it to 127.0.0.1:3000
+    // Load public certificate.
+    let certs = load_certs("src/sample.pem")?;
+    // Load private key.
+    let key = load_private_key("src/sample.rsa")?;
+
     let listener = TcpListener::bind(addr).await?;
+
+    // Set up TLS config
+    let mut server_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| error(e.to_string()))?;
+    server_config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     // We start a loop to continuously accept incoming connections
     loop {
@@ -27,18 +57,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         // Use an adapter to access something implementing `tokio::io` traits as if they implement
         // `hyper::rt` IO traits.
-        let io = TokioIo::new(stream);
+        // let io = TokioIo::new(stream);
 
         // Spawn a tokio task to serve multiple connections concurrently
+        let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
+            let tls_stream = match tls_acceptor.accept(stream).await {
+                Ok(tls_stream) => tls_stream,
+                Err(err) => {
+                    eprintln!("failed to perform tls handshake: {err:#}");
+                    return;
+                }
+            };
+
             // N.B. should use hyper service_fn here, since it's required to be implemented hyper Service trait!
             let svc = hyper::service::service_fn(echo);
             let svc = ServiceBuilder::new().layer_fn(Logger::new).service(svc);
-            if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
-                eprintln!("server error: {}", err);
+            if let Err(err) = Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls_stream), svc)
+                .await
+            {
+                eprintln!("failed to serve connection: {err:#}");
             }
         });
     }
+}
+
+// Load public certificate from file.
+fn load_certs(filename: &str) -> io::Result<Vec<CertificateDer<'static>>> {
+    // Open certificate file.
+    let certfile = fs::File::open(filename)
+        .map_err(|e| error(format!("failed to open {}: {}", filename, e)))?;
+    let mut reader = io::BufReader::new(certfile);
+
+    // Load and return certificate.
+    rustls_pemfile::certs(&mut reader).collect()
+}
+
+// Load private key from file.
+fn load_private_key(filename: &str) -> io::Result<PrivateKeyDer<'static>> {
+    // Open keyfile.
+    let keyfile = fs::File::open(filename)
+        .map_err(|e| error(format!("failed to open {}: {}", filename, e)))?;
+    let mut reader = io::BufReader::new(keyfile);
+
+    // Load and return a single private key.
+    rustls_pemfile::private_key(&mut reader).map(|key| key.unwrap())
+}
+
+fn error(err: String) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, err)
 }
 
 async fn echo(
