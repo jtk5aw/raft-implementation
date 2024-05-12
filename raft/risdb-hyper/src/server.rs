@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load public certificate.
     let certs = load_certs("src/sample.pem")?;
     // Load private key.
-    let key = load_private_key("src/sample.rsa")?;
+    let key = load_private_key("src/sample.ec")?;
 
     let listener = TcpListener::bind(addr).await?;
 
