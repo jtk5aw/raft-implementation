@@ -1,19 +1,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use hyper::client::HttpConnector;
-use hyper::http::uri::InvalidUri;
-use hyper::{Client, Uri};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use tonic::body::BoxBody;
 use tonic::Request;
-use tonic::transport::{Channel, ClientTlsConfig};
-use tracing::error;
+use tonic::transport::Channel;
 use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput};
 use crate::raft_grpc::raft_internal_client::RaftInternalClient;
 use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
@@ -23,7 +16,6 @@ use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
 pub enum PeerError {
     FailedToConnect(tonic::transport::Error),
     FailedToRetrieveCert(std::io::Error),
-    FailedToParseAddr(InvalidUri),
     FailedToPing(tonic::Status),
 }
 
@@ -36,12 +28,6 @@ impl From<tonic::transport::Error> for PeerError {
 impl From<std::io::Error> for PeerError {
     fn from(err: std::io::Error) -> PeerError {
         PeerError::FailedToRetrieveCert(err)
-    }
-}
-
-impl From<InvalidUri> for PeerError {
-    fn from(err: InvalidUri) -> PeerError {
-        PeerError::FailedToParseAddr(err)
     }
 }
 
@@ -115,7 +101,6 @@ pub trait PeerSetup {
         &self,
         addr: SocketAddr,
         peer_addr: String,
-        key_dir: PathBuf,
     ) -> Result<(), PeerError>;
 }
 
@@ -129,7 +114,6 @@ impl PeerSetup for PeerConnections {
         &self,
         addr: SocketAddr,
         peer_addr: String,
-        key_dir: PathBuf,
     ) -> Result<(), PeerError> {
         let mut client = RaftInternalClient::connect(
             peer_addr.to_string()

@@ -246,11 +246,10 @@ impl RaftImpl {
         // Attempt to create all connections
         for peer in peers {
             let peer_addr = peer.addr;
-            let key_dir = peer.key_dir;
             let mut attempt = 0;
 
             while attempt < 10 {
-                match peer_connections.handle_client_connection(addr, peer_addr.to_string(), key_dir.clone()).await {
+                match peer_connections.handle_client_connection(addr, peer_addr.to_string()).await {
                     Ok(_) => {
                         tracing::info!("Successfully connected to peer");
                         break;

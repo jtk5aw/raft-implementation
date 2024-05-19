@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr};
+use std::env;
 use std::path::{Path, PathBuf};
 
 use raft_grpc::server::{PeerArgs, RisDb, RisDbSetup, ServerArgs};
@@ -42,19 +42,12 @@ fn parse_server_args(workspace_base: PathBuf, arg: String) -> Result<ServerArgs,
     let raft_addr = this_server_arg.next()
         .ok_or("Did not have raft addr")?
         .parse()?;
-    
-    let key_dir = workspace_base
-        .join("certs")
-        .join(format!("key_{}", this_server_arg.next()
-            .ok_or("Did not have key dir")?
-        ));
 
     let peer_args = pairs
         .map(|peer_arg_str| {
             let split_peer_arg = peer_arg_str.split_once(',').unwrap();
             PeerArgs {
                 addr: split_peer_arg.0.to_string(),
-                key_dir: key_dir.join("certs").join(format!("keys_{}", split_peer_arg.1))
             }
         })
         .collect();
@@ -62,7 +55,6 @@ fn parse_server_args(workspace_base: PathBuf, arg: String) -> Result<ServerArgs,
     Ok(ServerArgs {
         risdb_addr,
         raft_addr,
-        key_dir,
         peer_args
     })
 }

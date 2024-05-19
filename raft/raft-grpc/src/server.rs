@@ -1,18 +1,8 @@
-use std::fs::{create_dir_all, File};
 use std::io::{Error as IoError};
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
 
-use hyper::server::conn::Http;
-use tower_http::ServiceBuilderExt;
-use tokio::{try_join, task::JoinHandle, signal};
-use tokio::net::TcpListener;
-use tokio_rustls::rustls::ServerConfig;
-use tonic::transport::{Server, ServerTlsConfig};
-use tokio_rustls::rustls::{Error as RustTlsError};
-use tokio_rustls::rustls::pki_types::CertificateDer;
-use tokio_rustls::TlsAcceptor;
+use tokio::{try_join, task::JoinHandle};
+use tonic::transport::Server;
 
 use crate::raft::node::{RaftImpl, HeartbeatError, SetupError};
 use crate::raft_grpc::raft_internal_server::RaftInternalServer;
@@ -23,14 +13,12 @@ use crate::risdb_impl::{RisDbImpl, RisDbSetupError};
 pub struct ServerArgs {
     pub risdb_addr: SocketAddr,
     pub raft_addr: SocketAddr,
-    pub key_dir: PathBuf,
     pub peer_args: Vec<PeerArgs>
 }
 
 #[derive(Debug)]
 pub struct PeerArgs {
     pub addr: String,
-    pub key_dir: PathBuf
 }
 
 // Errors
@@ -40,7 +28,6 @@ pub enum StartUpError {
     FailedToLocallyConnect(RisDbSetupError),
     FailedToHeartbeat(HeartbeatError),
     FailedToReadSelfSignedCert(IoError),
-    FailedToSetUpTls(RustTlsError),
     CustomError(String),
 }
 
@@ -73,13 +60,6 @@ impl From<IoError> for StartUpError {
         StartUpError::FailedToReadSelfSignedCert(err)
     }
 }
-
-impl From<RustTlsError> for StartUpError {
-    fn from(err: RustTlsError) -> StartUpError {
-        StartUpError::FailedToSetUpTls(err)
-    }
-}
-
 
 impl From<String> for StartUpError {
     fn from(err: String) -> StartUpError {
@@ -140,7 +120,6 @@ impl RisDbSetup for RisDb {
         let risdb_handle = tokio::spawn(
             serve_risdb(
                 risdb,
-                server_args.key_dir,
             )
         );
         let raft_handle = tokio::spawn(
@@ -199,9 +178,6 @@ impl RisDbSetup for RisDb {
                 StartUpError::FailedToReadSelfSignedCert(err) => {
                     tracing::error!("Failed to read a self signed cert to be used for TLS: {:?}" , err);
                 },
-                StartUpError::FailedToSetUpTls(err) => {
-                    tracing::error!("Failed to setup TLS: {:?}" , err);
-                },
             }
         }
 
@@ -224,79 +200,16 @@ async fn serve_raft(
 
 async fn serve_risdb(
     risdb: RisDbImpl,
-    key_dir: PathBuf,
 ) -> Result<(), StartUpError> {
     // TODO: This feels odd, shouldn't need to do this
     let addr = risdb.addr.clone();
 
-    let certs = {
-        let fd = std::fs::File::open(key_dir.join("server.crt"))?;
-        let mut buf = std::io::BufReader::new(&fd);
-        rustls_pemfile::certs(&mut buf)
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let key = {
-        let fd = std::fs::File::open(key_dir.join("priv.key"))?;
-        let mut buf = std::io::BufReader::new(&fd);
-        rustls_pemfile::private_key(&mut buf)?
-            .unwrap()
-    };
-
-    let mut tls = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    tls.alpn_protocols = vec![b"h2".to_vec()];
-
-    let svc = Server::builder()
+    Server::builder()
         .add_service(RisDbServer::new(risdb))
-        .into_service();
+        .serve(addr)
+        .await?;
 
-    let mut http = Http::new();
-    http.http2_only(true);
-
-    let listener = TcpListener::bind(addr).await?;
-    let tls_acceptor = TlsAcceptor::from(Arc::new(tls));
-
-    loop {
-        let (conn, addr) = match listener.accept().await {
-            Ok(incoming) => incoming,
-            Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
-                continue;
-            }
-        };
-
-        let http = http.clone();
-        let tls_acceptor = tls_acceptor.clone();
-        let svc = svc.clone();
-
-        tokio::spawn(async move {
-            let mut certificates = Vec::new();
-
-            let conn = tls_acceptor
-                .accept_with(conn, |info| {
-                    if let Some(certs) = info.peer_certificates() {
-                        for cert in certs {
-                            certificates.push(cert.clone());
-                        }
-                    }
-                })
-                .await
-                .unwrap();
-
-            let svc = tower::ServiceBuilder::new()
-                .service(svc);
-
-            http.serve_connection(conn, svc).await.unwrap();
-        });
-    }
-}
-
-
-async fn wait() {
-    println!("server listening");
-    signal::ctrl_c().await.expect("TODO: panic message");
-    println!("shutdown complete");
+    Ok(())
 }
 
 async fn flatten<T, D>(

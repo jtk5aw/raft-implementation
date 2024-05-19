@@ -1,7 +1,6 @@
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
-use raft_grpc::risdb::{PutRequest, GetRequest};
+use raft_grpc::risdb::GetRequest;
 use raft_grpc::risdb::ris_db_client::RisDbClient;
-use raft_grpc::shared::Value;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

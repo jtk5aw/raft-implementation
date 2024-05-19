@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use log::info;
-use pingora::{apps::ServerApp, connectors::TransportConnector, listeners::{Listeners, TlsSettings}, protocols::Stream, server::{configuration::Opt, Server, ShutdownWatch}, services::{listening::Service, Service as OtherService}, upstreams::peer::{BasicPeer, HttpPeer}};
+use pingora::{apps::ServerApp, connectors::TransportConnector, listeners::{Listeners, TlsSettings}, protocols::Stream, server::{configuration::Opt, Server, ShutdownWatch}, services::{listening::Service, Service as OtherService}, upstreams::peer::HttpPeer};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use structopt::StructOpt;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, select};
