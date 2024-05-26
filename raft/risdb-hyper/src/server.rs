@@ -1,50 +1,23 @@
-
 use std::{fs, io};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 use std::sync::Arc;
-
-use http_body_util::{Empty, Full};
-use hyper::body::{Body, Bytes};
-use hyper::{Request, Response, body::Incoming, service::Service};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty, Full};
+use hyper::body::{Body, Bytes, Frame, Incoming};
+use hyper::{Method, Request, Response, StatusCode};
+use hyper::service::Service;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::net::TcpListener;
-
-use hyper::body::Frame;
-use hyper::{Method, StatusCode};
-use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper_util::server::conn::auto::Builder;
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::try_join;
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
-use risdb_hyper::{error, get_workspace_base_dir};
+use super::helper::error;
 
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr_1 = SocketAddr::from_str("[::1]:3000").expect("Provided addr should be parseable");
-    let addr_2 = SocketAddr::from_str("[::1]:3001").expect("Provided addr should be parseable");
-
-    let base_dir = get_workspace_base_dir();
-    let cert_path = &base_dir
-        .join("certs")
-        .join("risdb.pem");
-    let key_path = &base_dir
-        .join("certs")
-        .join("risdb.ec");
-
-    let test = try_join!(
-        run(addr_1, cert_path, key_path),
-        run(addr_2, cert_path, key_path)
-    )?;
-
-    Ok(())
-}
-
-async fn run(
+//noinspection ALL
+pub async fn run(
     addr: SocketAddr,
     certs_path: &PathBuf,
     key_path: &PathBuf

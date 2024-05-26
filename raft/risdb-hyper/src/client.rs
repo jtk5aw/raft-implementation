@@ -1,118 +1,145 @@
 use std::{fs, io};
+use std::future::Future;
+use std::io::Error;
 use std::path::PathBuf;
-use hyper::Request;
-use hyper::client::conn::http2::handshake;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::net::TcpStream;
-use http_body_util::BodyExt;
-use hyper_util::client::legacy::Client;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::http::uri::{Authority, Scheme};
+use hyper::{http, Request, Uri};
+use hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::{Client, connect::HttpConnector};
+use hyper_util::rt::TokioExecutor;
+use prost::{DecodeError, Message};
 use rustls::{ClientConfig, RootCertStore};
-use tokio::io::{AsyncWriteExt as _};
-use serde::{Deserialize, Serialize};
-use risdb_hyper::{error, get_workspace_base_dir};
+use tokio::io::AsyncWriteExt;
+use crate::helper::error;
+use crate::items::{GetRequest, PutRequest, PutResponse};
 
-#[derive(Debug, Serialize, Deserialize)]
-struct GetKeysRequest {
-    keys: Vec<String>,
+// Errors
+#[derive(Debug)]
+pub enum ClientBuilderError {
+    MissingRootCertPath,
+    MissingBaseUri(String),
+    ClientBuilderIoError(std::io::Error)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // This is where we will setup our HTTP client requests.
+impl From<std::io::Error> for ClientBuilderError {
+    fn from(err: Error) -> Self {
+        ClientBuilderError::ClientBuilderIoError(err)
+    }
+}
 
-    let base_dir = get_workspace_base_dir();
-    // Load root cert
-    let tls = load_root_cert(&base_dir
-        .join("certs")
-        .join("ca.cert")
-    ).expect("Should create ClientConfig using provided root cert");
+#[derive(Debug)]
+pub enum RisDbError {
+    FailedToConstructRequest(http::Error),
+    FailedToMakeRequest(std::io::Error),
+    FailedToReadResponse(hyper::Error),
+    FailedToDecodeResponse(DecodeError),
+}
 
-    // Parse our URL...
-    let url = "https://localhost:3000/echo".parse::<hyper::Uri>()?;
+impl From<http::Error> for RisDbError {
+    fn from(err: http::Error) -> Self {
+        RisDbError::FailedToConstructRequest(err)
+    }
+}
 
-    // Get the host and the port
-    let host = url.host().expect("uri has no host");
-    let port = url.port_u16().unwrap_or(3000);
+impl From<std::io::Error> for RisDbError {
+    fn from(err: Error) -> Self {
+        RisDbError::FailedToMakeRequest(err)
+    }
+}
 
-    let address = format!("{}:{}", host, port);
+impl From<hyper::Error> for RisDbError {
+    fn from(err: hyper::Error) -> Self {
+        RisDbError::FailedToReadResponse(err)
+    }
+}
 
-    // Open a TCP connection to the remote host
-    let stream = TcpStream::connect(address).await?;
+impl From<DecodeError> for RisDbError {
+    fn from(err: DecodeError) -> Self {
+        RisDbError::FailedToDecodeResponse(err)
+    }
+}
 
-    // Use an adapter to access something implementing `tokio::io` traits as if they implement
-    // `hyper::rt` IO traits.
-    let io = TokioIo::new(stream);
+// Public Structs
+pub struct RisDbClient {
+    /// Hyper client used to actually make requests
+    // TODO: Consider changing this String type to something else. Maybe bytes
+    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    /// Base URI to make requests against
+    base_uri: Uri,
+    /// Authority derived from the base_uri
+    authority: Authority,
+    /// Scheme derived from the base_uri
+    scheme: Scheme,
+}
 
-    // TLS config
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls)
-        .https_only()
-        .enable_http2()
-        .build();
+pub struct ClientBuilder {
+    /// Root CA Cert path
+    ca_cert_path: Option<PathBuf>,
+    /// Base URI to make requests against
+    base_uri: Option<Uri>
+}
 
-    // The authority of our URL will be the hostname of the httpbin remote
-    let authority = url.authority().unwrap().clone();
+// Traits
+pub trait Get {
+    fn get(
+        &self,
+        keys: GetRequest
+    ) -> impl Future<Output = Result<GetRequest, RisDbError>> + Send;
+}
 
-    // TODO: Condense this into one
-    let mut res = if true {
-        let client: Client<_, String> = Client::builder(TokioExecutor::new())
-            .build(https);
+pub trait Put {
+    fn put(
+        &self,
+        values: PutRequest
+    ) -> impl Future<Output = Result<PutResponse, RisDbError>> + Send;
+}
 
-        // Create a GetKeysRequest request
-        let request_body = GetKeysRequest {
-            keys: vec!["key1".into(), "key2".into()]
-        };
-        let req = Request::post(url)
-            .header(hyper::header::HOST, authority.as_str())
-            .body(
-                serde_json::to_string(&request_body)?
-            )?;
-
-        client
-            .request(req)
-            .await
-            .map_err(|e| error(format!("Could not get: {:?}", e)))?
-    } else {
-        // Create the Hyper client
-        let (mut sender, conn) =
-            handshake(TokioExecutor::new(), io).await?;
-
-        // Spawn a task to poll the connection, driving the HTTP state
-        tokio::task::spawn(async move {
-            if let Err(err) = conn.await {
-                println!("Connection failed: {:?}", err);
-            }
-        });
-
-        // Create a GetKeysRequest request
-        let request_body = GetKeysRequest {
-            keys: vec!["key1".into(), "key2".into()]
-        };
-        let req = Request::post(url)
-            .header(hyper::header::HOST, authority.as_str())
-            .body(
-                serde_json::to_string(&request_body)?
-            )?;
-
-        // Await the response...
-        sender.send_request(req).await?
-    };
-
-    println!("Response status: {}", res.status());
-
-    // Stream the body, writing each frame to a buffer
-    let mut buf: Vec<u8> = Vec::with_capacity(20);
-    while let Some(next) = res.frame().await {
-        let frame = next?;
-        if let Some(chunk) = frame.data_ref() {
-            buf.write_all(chunk).await?;
+// Impls
+impl ClientBuilder {
+    pub fn new() -> Self {
+        Self {
+            ca_cert_path: None,
+            base_uri: None,
         }
     }
-    let test: GetKeysRequest = serde_json::from_slice(buf.as_slice())?;
 
-    println!("{:?}", test);
+    pub fn with_root_cert_path(mut self, root_cert_path: PathBuf) -> Self {
+        self.ca_cert_path = Some(root_cert_path);
+        self
+    }
 
-    Ok(())
+    pub fn with_base_uri(mut self, base_uri: Uri) -> Self {
+        self.base_uri = Some(base_uri);
+        self
+    }
+
+    pub async fn build(self) -> Result<RisDbClient, ClientBuilderError> {
+        let ca_cert_path = self.ca_cert_path.ok_or(
+            ClientBuilderError::MissingRootCertPath
+        )?;
+        let tls = load_root_cert(&ca_cert_path)?;
+        let parsed_uri = ParsedUri::parse_base_uri(self.base_uri)?;
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls)
+            .https_only()
+            .enable_http2()
+            .build();
+
+        // TODO: Figure out how this TokioExecutor plays with the Raft one. Is it even a real Tokio Executor?
+        // TODO: One hyper_rustls uses the new hyper stuff (not the legacy client) upgrade t
+        let client = Client::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build(https);
+
+        Ok(RisDbClient {
+            client,
+            base_uri: parsed_uri.base_uri,
+            authority: parsed_uri.authority,
+            scheme: parsed_uri.scheme,
+        })
+    }
 }
 
 fn load_root_cert(path: &PathBuf) -> Result<ClientConfig, std::io::Error> {
@@ -133,19 +160,74 @@ fn load_root_cert(path: &PathBuf) -> Result<ClientConfig, std::io::Error> {
     )
 }
 
-// NOTE: This part is only needed for HTTP/2. HTTP/1 doesn't need an executor.
-//
-// Since the Server needs to spawn some background tasks, we needed
-// to configure an Executor that can spawn !Send futures...
-#[derive(Clone, Copy, Debug)]
-struct LocalExec;
+struct ParsedUri {
+    base_uri: Uri,
+    authority: Authority,
+    scheme: Scheme,
+}
 
-impl<F> hyper::rt::Executor<F> for LocalExec
-    where
-        F: std::future::Future + 'static, // not requiring `Send`
-{
-    fn execute(&self, fut: F) {
-        // This will spawn into the currently running `LocalSet`.
-        tokio::task::spawn_local(fut);
+impl ParsedUri {
+    fn parse_base_uri(base_uri: Option<Uri>) -> Result<ParsedUri, ClientBuilderError> {
+        let base_uri = base_uri.ok_or(
+            ClientBuilderError::MissingBaseUri("Required to provide a Base URI".to_string())
+        )?;
+        let authority = base_uri.authority().ok_or(
+            ClientBuilderError::MissingBaseUri("Provided Base URI has no Authority".to_string())
+        )?.to_owned();
+        let scheme = base_uri.scheme().ok_or(
+            ClientBuilderError::MissingBaseUri("Provided Base URI must have a scheme".to_string())
+        )?.to_owned();
+
+        Ok(ParsedUri {
+            base_uri,
+            authority,
+            scheme,
+        })
+    }
+}
+
+impl Get for RisDbClient {
+    async fn get(&self, keys: GetRequest) -> Result<GetRequest, RisDbError> {
+        let mut buf = Vec::with_capacity(keys.encoded_len());
+        // Unwrap is safe, since we have reserved sufficient capacity in the vector.
+        keys.encode(&mut buf).unwrap();
+        let bytes = Bytes::from(buf);
+
+        // TODO: Make it so this is generated once rather than on every request
+        let get_uri = Uri::builder()
+            .scheme(self.scheme.clone())
+            .authority(self.authority.clone())
+            .path_and_query("/echo")
+            .build()?;
+
+        let req = Request::post(get_uri)
+            .header(hyper::header::HOST, self.authority.as_str())
+            .body(Full::from(bytes))?;
+
+        let mut result = self.client
+            .request(req)
+            .await
+            .map_err(|e| error(format!("Could not get: {:?}", e)))?;
+
+        let mut buf: Vec<u8> = Vec::with_capacity(20);
+        while let Some(next) = result.frame().await {
+            let frame = next?;
+            if let Some(chunk) = frame.data_ref() {
+                // TODO: This might be returned a confusing error fix if neccessary
+                buf.write_all(chunk).await?;
+            }
+        }
+        let bytes = Bytes::from(buf);
+
+        // TODO TODO TODO: Make the server send a GEtResposne and decode that
+        let response = GetRequest::decode(bytes)?;
+
+        Ok(response)
+    }
+}
+
+impl Put for RisDbClient {
+    async fn put(&self, values: PutRequest) -> Result<PutResponse, RisDbError> {
+        todo!()
     }
 }

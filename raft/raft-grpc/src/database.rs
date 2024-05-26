@@ -97,12 +97,6 @@ pub trait RisDbImpl {
         &self,
         server_args: ServerArgs
     ) -> JoinHandle<Result<(), StartUpError>>;
-
-    fn listen_for_crash(
-        &self,
-        handle: JoinHandle<Result<(), StartUpError>>,
-    ) -> Result<(), StartUpError>;
-
 }
 
 impl RisDbImpl for RisDb {
@@ -177,15 +171,6 @@ impl RisDbImpl for RisDb {
                 }
             }
         })
-    }
-
-    // This is basically identical to flatten down below but it uses block on instead of an async await
-    fn listen_for_crash(&self, handle: JoinHandle<Result<(), StartUpError>>) -> Result<(), StartUpError> {
-        match self.runtime.block_on(handle) {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(StartUpError::CustomError("handling failed".to_owned())),
-        }
     }
 }
 

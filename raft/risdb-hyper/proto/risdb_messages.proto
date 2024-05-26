@@ -1,18 +1,11 @@
 syntax = "proto3";
-package risdb;
-
-import "shared.proto";
-
-service RisDb {
-  rpc Put (PutRequest) returns (PutResponse);
-  rpc Get (GetRequest) returns (GetResponse);
-}
+package risdb.proto;
 
 message PutRequest {
   // request id
   string request_id = 1;
   // Values to put
-  repeated shared.Value values = 2;
+  repeated Value values = 2;
 }
 
 message PutResponse {
@@ -35,5 +28,12 @@ message GetResponse {
   // boolean representing success or failure
   bool success = 2;
   /// Values being returned
-  repeated shared.Value values = 3;
+  repeated Value values = 3;
+}
+
+message Value {
+  // Key to write to
+  string key = 1;
+  // Value to associate with the above key
+  string value = 2;
 }

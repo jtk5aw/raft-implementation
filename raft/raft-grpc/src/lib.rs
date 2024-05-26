@@ -2,7 +2,6 @@
 // making it useless
 #![allow(clippy::blocks_in_conditions)]
 
-mod risdb_impl;
 pub mod database;
 mod raft;
 
