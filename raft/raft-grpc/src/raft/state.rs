@@ -1,6 +1,6 @@
+use crate::raft_grpc::LogEntry;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::raft_grpc::LogEntry;
 
 #[derive(Debug, Clone)]
 pub struct RaftStableState {

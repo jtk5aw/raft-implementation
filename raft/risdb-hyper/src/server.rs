@@ -1,26 +1,26 @@
-use std::{fs, io};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+use super::helper::error;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Bytes, Frame, Incoming};
-use hyper::{Method, Request, Response, StatusCode};
 use hyper::service::Service;
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::{fs, io};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
-use super::helper::error;
 
 //noinspection ALL
 pub async fn run(
     addr: SocketAddr,
     certs_path: &PathBuf,
-    key_path: &PathBuf
+    key_path: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load public certificate.
     let certs = load_certs(certs_path)?;
@@ -95,9 +95,7 @@ async fn echo(
     req: Request<Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => Ok(Response::new(full(
-            "Try POSTing data to /echo",
-        ))),
+        (&Method::GET, "/") => Ok(Response::new(full("Try POSTing data to /echo"))),
         (&Method::POST, "/echo") => Ok(Response::new(req.into_body().boxed())),
         (&Method::POST, "/echo/uppercase") => {
             // Map this body's frame to a different type
@@ -115,7 +113,7 @@ async fn echo(
             });
 
             Ok(Response::new(frame_stream.boxed()))
-        },
+        }
         (&Method::POST, "/echo/reversed") => {
             // Protect our server from massive bodies.
             let upper = req.body().size_hint().upper().unwrap_or(u64::MAX);
@@ -129,13 +127,10 @@ async fn echo(
             let whole_body = req.collect().await?.to_bytes();
 
             // Iterate the whole body in reverse order and collect into a new Vec.
-            let reversed_body = whole_body.iter()
-                .rev()
-                .cloned()
-                .collect::<Vec<u8>>();
+            let reversed_body = whole_body.iter().rev().cloned().collect::<Vec<u8>>();
 
             Ok(Response::new(full(reversed_body)))
-        },
+        }
         // Return 404 Not Found for other routes.
         _ => {
             let mut not_found = Response::new(empty());
@@ -157,8 +152,8 @@ impl<S> Logger<S> {
 type Req = Request<Incoming>;
 
 impl<S> Service<Req> for Logger<S>
-    where
-        S: Service<Req>,
+where
+    S: Service<Req>,
 {
     type Response = S::Response;
     type Error = S::Error;

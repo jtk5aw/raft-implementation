@@ -1,11 +1,10 @@
+use crate::raft::peer::StateMachineError;
+use crate::raft::state::{RaftStableData, RaftVolatileData};
+use crate::raft_grpc::log_entry::LogAction;
+use crate::raft_grpc::LogEntry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::raft::state::{RaftStableData, RaftVolatileData};
-use crate::raft_grpc::log_entry::LogAction;
-use crate::raft_grpc::{GetValueInput, GetValueOutput, LogEntry};
-use crate::raft::peer::StateMachineError;
-use crate::shared::Value;
 
 #[derive(Default, Debug)]
 pub struct DataStore {
@@ -14,7 +13,6 @@ pub struct DataStore {
 
 #[tonic::async_trait]
 pub(crate) trait StateMachine {
-
     ///
     /// Check if last_applied < commit_index. As long as that statement is true, the log
     /// at last_applied + 1 will be applied to the state machine.
@@ -37,27 +35,19 @@ pub(crate) trait StateMachine {
         &self,
         log_entry_to_apply: &LogEntry,
     ) -> Result<(), StateMachineError>;
-
 }
 
 #[tonic::async_trait]
 impl StateMachine for DataStore {
-
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn update_state_machine(
         &self,
         stable_data: &RaftStableData,
         volatile_data: &mut RaftVolatileData,
     ) -> Result<i64, StateMachineError> {
-
         let mut num_updates = 0;
 
         while volatile_data.last_applied < volatile_data.commit_index {
-
             let index_to_apply = volatile_data.last_applied + 1;
 
             let log_entry_to_apply = &stable_data.log[index_to_apply as usize];
@@ -71,11 +61,7 @@ impl StateMachine for DataStore {
         Ok(num_updates)
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn apply_to_state_machine(
         &self,
         log_entry_to_apply: &LogEntry,
@@ -84,27 +70,26 @@ impl StateMachine for DataStore {
 
         match LogAction::from_i32(log_entry_to_apply.log_action) {
             Some(LogAction::Put) => {
-                let value = log_entry_to_apply.value
-                    .as_ref()
-                    .ok_or_else(|| StateMachineError::FailedToApplyLogs("Failed to get log entries value".to_owned()))?;
+                let value = log_entry_to_apply.value.as_ref().ok_or_else(|| {
+                    StateMachineError::FailedToApplyLogs(
+                        "Failed to get log entries value".to_owned(),
+                    )
+                })?;
 
-                data.insert(
-                    value.key.to_owned(),
-                    value.value.to_owned()
-                );
+                data.insert(value.key.to_owned(), value.value.to_owned());
 
                 Ok(())
-            },
+            }
             Some(LogAction::Delete) => {
                 todo!("Delete functionality is not yet implemented")
-            },
+            }
             Some(LogAction::Noop) => {
                 // do nothing
                 Ok(())
-            },
-            None => {
-                Err(StateMachineError::FailedToApplyLogs("No log action was stored".to_owned()))
             }
+            None => Err(StateMachineError::FailedToApplyLogs(
+                "No log action was stored".to_owned(),
+            )),
         }
     }
 }
@@ -121,19 +106,18 @@ mod tests {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
 
-        let expected_data = {
-            raft.data_store.data.lock().await.clone()
-        };
+        let expected_data = { raft.data_store.data.lock().await.clone() };
 
-        let result = raft.data_store.apply_to_state_machine(&LogEntry {
-            log_action: LogAction::Noop as i32,
-            value: None,
-            term: 0,
-        }).await;
+        let result = raft
+            .data_store
+            .apply_to_state_machine(&LogEntry {
+                log_action: LogAction::Noop as i32,
+                value: None,
+                term: 0,
+            })
+            .await;
 
-        let after_data = {
-            raft.data_store.data.lock().await.clone()
-        };
+        let after_data = { raft.data_store.data.lock().await.clone() };
 
         assert!(
             result.is_ok(),
@@ -143,7 +127,8 @@ mod tests {
         assert!(
             expected_data == after_data,
             "The two values were not equal `{:?}` after_data: `{:?}`",
-            expected_data, after_data
+            expected_data,
+            after_data
         );
     }
 
@@ -158,18 +143,19 @@ mod tests {
             original
         };
 
-        let result = raft.data_store.apply_to_state_machine(&LogEntry {
-            log_action: LogAction::Put as i32,
-            value: Some(Value {
-                key: "key".to_owned(),
-                value: "value".to_owned(),
-            }),
-            term: 0,
-        }).await;
+        let result = raft
+            .data_store
+            .apply_to_state_machine(&LogEntry {
+                log_action: LogAction::Put as i32,
+                value: Some(Value {
+                    key: "key".to_owned(),
+                    value: "value".to_owned(),
+                }),
+                term: 0,
+            })
+            .await;
 
-        let after_data = {
-            raft.data_store.data.lock().await.clone()
-        };
+        let after_data = { raft.data_store.data.lock().await.clone() };
 
         assert!(
             result.is_ok(),
@@ -179,7 +165,8 @@ mod tests {
         assert!(
             expected_data == after_data,
             "The two values were not equal `{:?}` after_data: `{:?}`",
-            expected_data, after_data
+            expected_data,
+            after_data
         );
     }
 
@@ -187,33 +174,37 @@ mod tests {
     async fn multiple_put_apply_to_state_machine() {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
-        
+
         let expected_data = {
             let mut original = raft.data_store.data.lock().await.clone();
             original.insert("key".to_owned(), "value_2".to_owned());
             original
         };
 
-        let _ = raft.data_store.apply_to_state_machine(&LogEntry {
-            log_action: LogAction::Put as i32,
-            value: Some(Value {
-                key: "key".to_owned(),
-                value: "value".to_owned(),
-            }),
-            term: 0,
-        }).await;
-        let result = raft.data_store.apply_to_state_machine(&LogEntry {
-            log_action: LogAction::Put as i32,
-            value: Some(Value {
-                key: "key".to_owned(),
-                value: "value_2".to_owned(),
-            }),
-            term: 0,
-        }).await;
+        let _ = raft
+            .data_store
+            .apply_to_state_machine(&LogEntry {
+                log_action: LogAction::Put as i32,
+                value: Some(Value {
+                    key: "key".to_owned(),
+                    value: "value".to_owned(),
+                }),
+                term: 0,
+            })
+            .await;
+        let result = raft
+            .data_store
+            .apply_to_state_machine(&LogEntry {
+                log_action: LogAction::Put as i32,
+                value: Some(Value {
+                    key: "key".to_owned(),
+                    value: "value_2".to_owned(),
+                }),
+                term: 0,
+            })
+            .await;
 
-        let after_data = {
-            raft.data_store.data.lock().await.clone()
-        };
+        let after_data = { raft.data_store.data.lock().await.clone() };
 
         assert!(
             result.is_ok(),
@@ -223,7 +214,8 @@ mod tests {
         assert!(
             expected_data == after_data,
             "The two values were not equal `{:?}` after_data: `{:?}`",
-            expected_data, after_data
+            expected_data,
+            after_data
         );
     }
 
@@ -231,12 +223,15 @@ mod tests {
     async fn none_apply_to_state_machine() {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
-        
-        let result = raft.data_store.apply_to_state_machine(&LogEntry {
-            log_action: -1,
-            value: None,
-            term: 0,
-        }).await;
+
+        let result = raft
+            .data_store
+            .apply_to_state_machine(&LogEntry {
+                log_action: -1,
+                value: None,
+                term: 0,
+            })
+            .await;
 
         assert!(result.is_err());
     }
@@ -245,21 +240,21 @@ mod tests {
     async fn two_noops_update_state_machine() {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
-        
+
         {
             // setup stable data
             let mut raft_stable_data = raft.state.raft_data.lock().await;
             raft_stable_data.log.append(&mut vec![
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Noop as i32,
                     value: None,
-                    term: 1
+                    term: 1,
                 },
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Noop as i32,
                     value: None,
-                    term: 1
-                }
+                    term: 1,
+                },
             ]);
 
             // setup volatile data
@@ -270,7 +265,10 @@ mod tests {
         let raft_stable_data = raft.state.raft_data.lock().await;
         let mut raft_volatile_data = raft.volatile_state.raft_data.lock().await;
 
-        let result = raft.data_store.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+        let result = raft
+            .data_store
+            .update_state_machine(&raft_stable_data, &mut raft_volatile_data)
+            .await;
 
         assert!(
             result.is_ok(),
@@ -299,21 +297,27 @@ mod tests {
     async fn two_puts_update_state_machine() {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
-        
+
         {
             // setup stable data
             let mut raft_stable_data = raft.state.raft_data.lock().await;
             raft_stable_data.log.append(&mut vec![
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Put as i32,
-                    value: Some(Value { key: "world".to_string(), value: "hello".to_string() }),
-                    term: 1
+                    value: Some(Value {
+                        key: "world".to_string(),
+                        value: "hello".to_string(),
+                    }),
+                    term: 1,
                 },
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Put as i32,
-                    value: Some(Value { key: "hello".to_string(), value: "world".to_string() }),
-                    term: 1
-                }
+                    value: Some(Value {
+                        key: "hello".to_string(),
+                        value: "world".to_string(),
+                    }),
+                    term: 1,
+                },
             ]);
 
             // setup volatile data
@@ -324,7 +328,10 @@ mod tests {
         let raft_stable_data = raft.state.raft_data.lock().await;
         let mut raft_volatile_data = raft.volatile_state.raft_data.lock().await;
 
-        let result = raft.data_store.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+        let result = raft
+            .data_store
+            .update_state_machine(&raft_stable_data, &mut raft_volatile_data)
+            .await;
 
         assert!(
             result.is_ok(),
@@ -344,7 +351,7 @@ mod tests {
         let data_store = raft.data_store.data.lock().await;
         let expected_data = HashMap::from([
             ("hello".to_string(), "world".to_string()),
-            ("world".to_string(), "hello".to_string())
+            ("world".to_string(), "hello".to_string()),
         ]);
         assert!(
             *data_store == expected_data,
@@ -357,21 +364,21 @@ mod tests {
     async fn last_applied_equals_commit_update_state_machine() {
         let raft_impl = RaftImpl::new(Arc::new(Database::new("[::1]:5000".parse().unwrap())));
         let raft = raft_impl.inner;
-        
+
         {
             // setup stable data
             let mut raft_stable_data = raft.state.raft_data.lock().await;
             raft_stable_data.log.append(&mut vec![
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Noop as i32,
                     value: None,
-                    term: 1
+                    term: 1,
                 },
-                LogEntry{
+                LogEntry {
                     log_action: LogAction::Noop as i32,
                     value: None,
-                    term: 1
-                }
+                    term: 1,
+                },
             ]);
 
             // setup volatile data
@@ -382,7 +389,10 @@ mod tests {
         let raft_stable_data = raft.state.raft_data.lock().await;
         let mut raft_volatile_data = raft.volatile_state.raft_data.lock().await;
 
-        let result = raft.data_store.update_state_machine(&raft_stable_data, &mut raft_volatile_data).await;
+        let result = raft
+            .data_store
+            .update_state_machine(&raft_stable_data, &mut raft_volatile_data)
+            .await;
 
         assert!(
             result.is_ok(),

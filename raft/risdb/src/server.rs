@@ -7,7 +7,6 @@ use raft_grpc::database::{PeerArgs, RisDb, RisDbImpl, ServerArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
     setup_tracing()?;
 
     let args: Vec<_> = env::args().collect();
@@ -20,8 +19,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _handle = ris_db.startup(server_args);
 
     // TODO: In case I get sidetracked by other stuff, I want that thin layer in front to be
-    //  the stuff in risdb-hyper for now. Also ideally the raft stuff would communicate with each other 
-    //  via TLS but I was at my limit trying to make that work with tonic   
+    //  the stuff in risdb-hyper for now. Also ideally the raft stuff would communicate with each other
+    //  via TLS but I was at my limit trying to make that work with tonic
     loop {
         // Imagine this is the hyper server
         sleep(Duration::from_secs(5));
@@ -31,13 +30,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_server_args(arg: String) -> Result<ServerArgs, Box<dyn std::error::Error>> {
     let mut pairs = arg.split(";");
 
-    let mut this_server_arg = pairs.next()
+    let mut this_server_arg = pairs
+        .next()
         .ok_or_else(|| "Failed to get server arg".to_string())?
         .split(',');
-    let risdb_addr = this_server_arg.next()
+    let risdb_addr = this_server_arg
+        .next()
         .ok_or("Did not have risdb addr")?
         .parse()?;
-    let raft_addr = this_server_arg.next()
+    let raft_addr = this_server_arg
+        .next()
         .ok_or("Did not have raft addr")?
         .parse()?;
 
@@ -53,7 +55,7 @@ fn parse_server_args(arg: String) -> Result<ServerArgs, Box<dyn std::error::Erro
     Ok(ServerArgs {
         risdb_addr,
         raft_addr,
-        peer_args
+        peer_args,
     })
 }
 

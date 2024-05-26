@@ -1,3 +1,6 @@
+use crate::raft::state::{RaftNodeType, RaftStableData, RaftVolatileData};
+use crate::raft_grpc::raft_internal_client::RaftInternalClient;
+use crate::raft_grpc::{AppendEntriesInput, LogEntry, PingInput, RequestVoteInput};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::DerefMut;
@@ -5,11 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use tonic::Request;
 use tonic::transport::Channel;
-use crate::raft_grpc::{PingInput, LogEntry, AppendEntriesInput, RequestVoteInput};
-use crate::raft_grpc::raft_internal_client::RaftInternalClient;
-use crate::raft::state::{RaftStableData, RaftVolatileData, RaftNodeType};
+use tonic::Request;
 
 // Errors
 #[derive(Debug)]
@@ -36,7 +36,6 @@ impl From<tonic::Status> for PeerError {
         PeerError::FailedToPing(err)
     }
 }
-
 
 #[derive(Debug)]
 pub enum LeaderError {
@@ -81,12 +80,12 @@ pub struct RaftLeaderState {
 #[derive(Debug)]
 pub struct ProposeToPeersResult {
     count_communicated: i64,
-    request_append_entries_results: Vec<Result<i64, LeaderError>>
+    request_append_entries_results: Vec<Result<i64, LeaderError>>,
 }
 
 #[derive(Debug)]
 pub struct RequestVotesResult {
-    pub won_election: bool
+    pub won_election: bool,
 }
 
 // Traits
@@ -107,16 +106,13 @@ pub trait PeerSetup {
 
 #[tonic::async_trait]
 impl PeerSetup for PeerConnections {
-
     #[tracing::instrument(skip_all)]
     async fn handle_client_connection(
         &self,
         addr: SocketAddr,
         peer_addr: String,
     ) -> Result<(), PeerError> {
-        let mut client = RaftInternalClient::connect(
-            peer_addr.to_string()
-        ).await?;
+        let mut client = RaftInternalClient::connect(peer_addr.to_string()).await?;
 
         let request = Request::new(PingInput {
             requester: addr.port().to_string(),
@@ -135,7 +131,7 @@ impl PeerSetup for PeerConnections {
                     next_index: 1,
                     match_index: 0,
                 }),
-            }
+            },
         );
 
         Ok(())
@@ -147,8 +143,8 @@ mod peer_setup_tests {
     use tokio::{sync::OnceCell, time::sleep};
     use tonic::transport::Server;
 
-    use crate::{raft_grpc::raft_internal_server::RaftInternalServer, raft::node::RaftImpl};
     use crate::raft::node::Database;
+    use crate::{raft::node::RaftImpl, raft_grpc::raft_internal_server::RaftInternalServer};
 
     use super::*;
 
@@ -160,7 +156,9 @@ mod peer_setup_tests {
 
         tokio::spawn(async move {
             let _ = Server::builder()
-                .add_service(RaftInternalServer::new(RaftImpl::new(Arc::new(Database::new(peer_addr)))))
+                .add_service(RaftInternalServer::new(RaftImpl::new(Arc::new(
+                    Database::new(peer_addr),
+                ))))
                 .serve(peer_addr)
                 .await;
         });
@@ -184,10 +182,9 @@ mod peer_setup_tests {
             peers: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        let result = peer_connections.handle_client_connection(
-            addr,
-            peer_addr_with_scheme.to_owned()
-        ).await;
+        let result = peer_connections
+            .handle_client_connection(addr, peer_addr_with_scheme.to_owned())
+            .await;
 
         let peers = peer_connections.peers.lock().await;
         assert!(
@@ -196,7 +193,14 @@ mod peer_setup_tests {
             result,
         );
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers.get(&peer_addr_with_scheme).unwrap().connection.is_some(), true);
+        assert_eq!(
+            peers
+                .get(&peer_addr_with_scheme)
+                .unwrap()
+                .connection
+                .is_some(),
+            true
+        );
     }
 
     #[tokio::test]
@@ -210,10 +214,9 @@ mod peer_setup_tests {
             peers: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        let result = peer_connections.handle_client_connection(
-            addr,
-            wrong_peer_addr_with_scheme.to_owned()
-        ).await;
+        let result = peer_connections
+            .handle_client_connection(addr, wrong_peer_addr_with_scheme.to_owned())
+            .await;
 
         assert!(
             result.is_err(),
@@ -244,7 +247,7 @@ pub trait Leader {
         addr: String,
         stable_data: &mut RaftStableData,
         volatile_data: &mut RaftVolatileData,
-        log_entries: Vec<LogEntry>
+        log_entries: Vec<LogEntry>,
     ) -> Result<(), StateMachineError>;
 
     /**
@@ -273,7 +276,7 @@ pub trait Leader {
     async fn calculate_new_commit_index(
         &self,
         count_communicated: i64,
-        results: Vec<Result<i64, LeaderError>>
+        results: Vec<Result<i64, LeaderError>>,
     ) -> Result<i64, LeaderError>;
 
     /**
@@ -290,47 +293,39 @@ pub trait Leader {
         count_communicated: Arc<Mutex<i64>>,
         peer_addr: String,
         peer_data: &mut PeerData,
-        curr_commit_index: i64
+        curr_commit_index: i64,
     ) -> Result<i64, LeaderError>;
 }
 
 #[tonic::async_trait]
 impl Leader for PeerConnections {
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn write_and_share_logs(
         &self,
         addr: String,
         stable_data: &mut RaftStableData,
         volatile_data: &mut RaftVolatileData,
-        log_entries: Vec<LogEntry>
+        log_entries: Vec<LogEntry>,
     ) -> Result<(), StateMachineError> {
-
         tracing::info!("Writing new value to own log");
 
-        log_entries
-            .iter()
-            .for_each(|log_entry| {
-                stable_data.log.push(log_entry.to_owned());
-            });
+        log_entries.iter().for_each(|log_entry| {
+            stable_data.log.push(log_entry.to_owned());
+        });
 
         // TODO: Continue retrying to reach peers that failed and also handle decrementing log entry and retrying for log inconsistencies
         tracing::info!("Proposing new value to peers");
 
-        let propose_to_peers_result = self.share_to_peers(
-            addr,
-            stable_data,
-            volatile_data.commit_index,
-        ).await;
+        let propose_to_peers_result = self
+            .share_to_peers(addr, stable_data, volatile_data.commit_index)
+            .await;
 
-        let convert_to_follower: Vec<&Result<i64, LeaderError>> = propose_to_peers_result.request_append_entries_results
+        let convert_to_follower: Vec<&Result<i64, LeaderError>> = propose_to_peers_result
+            .request_append_entries_results
             .iter()
             .filter(|result| match result {
                 Err(LeaderError::ConvertToFollower(_)) => true,
-                _ => false
+                _ => false,
             })
             .collect();
 
@@ -340,7 +335,7 @@ impl Leader for PeerConnections {
                 .iter()
                 .map(|result| match result {
                     Err(LeaderError::ConvertToFollower(term)) => term.to_owned(),
-                    _ => -10 // This should never happen so it is made an arbitrarily small number
+                    _ => -10, // This should never happen so it is made an arbitrarily small number
                 })
                 .max()
                 .unwrap_or_else(|| stable_data.current_term);
@@ -351,64 +346,62 @@ impl Leader for PeerConnections {
 
         tracing::info!(?propose_to_peers_result, "Calculate the new commit index");
 
-        match self.calculate_new_commit_index(
-            propose_to_peers_result.count_communicated,
-            propose_to_peers_result.request_append_entries_results
-        ).await {
+        match self
+            .calculate_new_commit_index(
+                propose_to_peers_result.count_communicated,
+                propose_to_peers_result.request_append_entries_results,
+            )
+            .await
+        {
             Ok(min_new_commit_index) => {
                 volatile_data.commit_index = min_new_commit_index;
-            },
+            }
             Err(_) => {
                 tracing::error!("Data not committed not enough peers received updates");
-                Err(StateMachineError::FailedToWriteToLogs("Data not committed, not enough peers received updates".to_owned()))?
+                Err(StateMachineError::FailedToWriteToLogs(
+                    "Data not committed, not enough peers received updates".to_owned(),
+                ))?
             }
         }
 
         Ok(())
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret,
-    )]
+    #[tracing::instrument(skip_all, ret)]
     async fn share_to_peers(
         &self,
         addr: String,
         raft_stable_data: &RaftStableData,
         curr_commit_index: i64,
     ) -> ProposeToPeersResult {
-
         let count_communicated: Arc<Mutex<i64>> = Arc::new(Mutex::new(1)); // Set to 1 to include self
         let request_append_entries_results: Vec<Result<i64, LeaderError>> = {
-            futures::future::join_all(self.peers.lock().await
-                .deref_mut()
-                .iter_mut()
-                .map(|(peer_addr, peer_data)| self.request_append_entries_peer(
-                    addr.to_string(),
-                    raft_stable_data,
-                    count_communicated.clone(),
-                    peer_addr.to_owned(),
-                    peer_data,
-                    curr_commit_index
-                ))
-            ).await
+            futures::future::join_all(self.peers.lock().await.deref_mut().iter_mut().map(
+                |(peer_addr, peer_data)| {
+                    self.request_append_entries_peer(
+                        addr.to_string(),
+                        raft_stable_data,
+                        count_communicated.clone(),
+                        peer_addr.to_owned(),
+                        peer_data,
+                        curr_commit_index,
+                    )
+                },
+            ))
+            .await
         };
 
         ProposeToPeersResult {
             count_communicated: *count_communicated.clone().lock().await,
-            request_append_entries_results
+            request_append_entries_results,
         }
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn calculate_new_commit_index(
         &self,
         count_communicated: i64,
-        results: Vec<Result<i64, LeaderError>>
+        results: Vec<Result<i64, LeaderError>>,
     ) -> Result<i64, LeaderError> {
         let peers = self.peers.lock().await;
         if count_communicated > (peers.len() / 2) as i64 {
@@ -423,16 +416,12 @@ impl Leader for PeerConnections {
             )
         } else {
             Err(LeaderError::NotEnoughPeersUpdated(
-                "Not enough peers were updated to get a new commit index".to_owned()
+                "Not enough peers were updated to get a new commit index".to_owned(),
             ))
         }
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn request_append_entries_peer(
         &self,
         addr: String,
@@ -442,11 +431,13 @@ impl Leader for PeerConnections {
         peer_data: &mut PeerData,
         curr_commit_index: i64,
     ) -> Result<i64, LeaderError> {
-        let peer_leader_state = peer_data.leader_state
+        let peer_leader_state = peer_data
+            .leader_state
             .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
 
-        let peer_leader_connection = peer_data.connection
+        let peer_leader_connection = peer_data
+            .connection
             .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
 
@@ -461,18 +452,34 @@ impl Leader for PeerConnections {
         // Make request to append entries
         tracing::info!("Append entires to {:?} until it is caught up", peer_addr);
         loop {
-            tracing::info!("Make request to {:?} with next_index of {:?}", peer_addr, peer_leader_state.next_index);
-            let request_result = match timeout(Duration::from_secs(1), peer_leader_connection.append_entries(AppendEntriesInput {
-                leader_id: addr.to_string(),
-                term: raft_stable_data.current_term,
-                entries: raft_stable_data.log[(peer_leader_state.next_index as usize)..].to_vec(),
-                prev_log_index: peer_leader_state.next_index - 1,
-                prev_log_term: raft_stable_data.log[(peer_leader_state.next_index - 1) as usize].term,
-                leader_commit: curr_commit_index,
-            })).await {
+            tracing::info!(
+                "Make request to {:?} with next_index of {:?}",
+                peer_addr,
+                peer_leader_state.next_index
+            );
+            let request_result = match timeout(
+                Duration::from_secs(1),
+                peer_leader_connection.append_entries(AppendEntriesInput {
+                    leader_id: addr.to_string(),
+                    term: raft_stable_data.current_term,
+                    entries: raft_stable_data.log[(peer_leader_state.next_index as usize)..]
+                        .to_vec(),
+                    prev_log_index: peer_leader_state.next_index - 1,
+                    prev_log_term: raft_stable_data.log
+                        [(peer_leader_state.next_index - 1) as usize]
+                        .term,
+                    leader_commit: curr_commit_index,
+                }),
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(e) => {
-                    tracing::warn!(?e, ?peer_addr, "Call to append entires to peer timed out. Retry");
+                    tracing::warn!(
+                        ?e,
+                        ?peer_addr,
+                        "Call to append entires to peer timed out. Retry"
+                    );
                     continue;
                 }
             };
@@ -490,7 +497,7 @@ impl Leader for PeerConnections {
             if append_entries_output.success {
                 tracing::info!(?peer_addr, "Successfully appended entries to peer");
 
-                peer_leader_state.next_index = raft_stable_data.log.len()  as i64;
+                peer_leader_state.next_index = raft_stable_data.log.len() as i64;
                 peer_leader_state.match_index = (raft_stable_data.log.len() - 1) as i64;
 
                 if peer_leader_state.match_index >= curr_commit_index {
@@ -498,8 +505,13 @@ impl Leader for PeerConnections {
                     *count_communicated.lock().await += 1;
                 }
                 return Ok(peer_leader_state.match_index);
-            } else if !append_entries_output.success && append_entries_output.term > raft_stable_data.current_term {
-                tracing::info!(?peer_addr, "Peer's term is greater than this node's. Converting to follower");
+            } else if !append_entries_output.success
+                && append_entries_output.term > raft_stable_data.current_term
+            {
+                tracing::info!(
+                    ?peer_addr,
+                    "Peer's term is greater than this node's. Converting to follower"
+                );
                 Err(LeaderError::ConvertToFollower(append_entries_output.term))?
             } else {
                 // This is the only branch that loops again
@@ -512,7 +524,6 @@ impl Leader for PeerConnections {
 
 #[tonic::async_trait]
 pub trait Candidate {
-
     /**
      * Requests votes from peers. Asynchronous calls to all peers are made. Tallies up results and determines
      * if the election was won or lost
@@ -523,7 +534,7 @@ pub trait Candidate {
     async fn request_votes(
         &self,
         addr: String,
-        raft_stable_data: &RaftStableData
+        raft_stable_data: &RaftStableData,
     ) -> RequestVotesResult;
 
     /**
@@ -538,7 +549,7 @@ pub trait Candidate {
         addr: String,
         peer_addr: String,
         peer_data: &mut PeerData,
-        raft_stable_data: &RaftStableData
+        raft_stable_data: &RaftStableData,
     ) -> Result<bool, CandidateError>;
 
     /**
@@ -547,83 +558,86 @@ pub trait Candidate {
      * Returns:
      * bool: True if this node should convert to leader. False if not
      */
-    async fn determine_election_result(
-        &self,
-        count_voted_yes: i64,
-    ) -> bool;
+    async fn determine_election_result(&self, count_voted_yes: i64) -> bool;
 }
 
 #[tonic::async_trait]
 impl Candidate for PeerConnections {
-    #[tracing::instrument(
-        skip_all,
-        ret,
-    )]
+    #[tracing::instrument(skip_all, ret)]
     async fn request_votes(
         &self,
         addr: String,
-        raft_stable_data: &RaftStableData
+        raft_stable_data: &RaftStableData,
     ) -> RequestVotesResult {
         let results = {
-            futures::future::join_all(self.peers.lock().await
-                .deref_mut()
-                .iter_mut()
-                .map(|(peer_addr, peer_data)| self.request_vote_from_peer(
-                    addr.to_owned(),
-                    peer_addr.to_owned(),
-                    peer_data,
-                    raft_stable_data
-                ))
-            ).await
+            futures::future::join_all(self.peers.lock().await.deref_mut().iter_mut().map(
+                |(peer_addr, peer_data)| {
+                    self.request_vote_from_peer(
+                        addr.to_owned(),
+                        peer_addr.to_owned(),
+                        peer_data,
+                        raft_stable_data,
+                    )
+                },
+            ))
+            .await
         };
 
         let count_peers_voted_yes = results
             .into_iter()
-            .filter(|result| result
-                .as_ref()
-                .is_ok_and(|voted_for| voted_for.to_owned())
-            )
+            .filter(|result| result.as_ref().is_ok_and(|voted_for| voted_for.to_owned()))
             .count() as i64;
         let count_voted_yes = count_peers_voted_yes + 1; // Add 1 to include self
 
         let won_election = self.determine_election_result(count_voted_yes).await;
 
-        tracing::info!(count_voted_yes, won_election, addr, "Election result values for debugging");
+        tracing::info!(
+            count_voted_yes,
+            won_election,
+            addr,
+            "Election result values for debugging"
+        );
 
-        RequestVotesResult {
-            won_election
-        }
+        RequestVotesResult { won_election }
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
+    #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn request_vote_from_peer(
         &self,
         addr: String,
         peer_addr: String,
         peer_data: &mut PeerData,
-        raft_stable_data: &RaftStableData
+        raft_stable_data: &RaftStableData,
     ) -> Result<bool, CandidateError> {
-        let peer_connection = peer_data.connection
-        .as_mut()
-        .ok_or_else(|| CandidateError::NoClientFound(format!("Raft Client found for {:?}", peer_addr)))?;
+        let peer_connection = peer_data.connection.as_mut().ok_or_else(|| {
+            CandidateError::NoClientFound(format!("Raft Client found for {:?}", peer_addr))
+        })?;
 
         let last_log_index = (raft_stable_data.log.len() - 1) as i64;
-        let last_log_term = raft_stable_data.log.last().expect("Log should always be at least length 1").term;
+        let last_log_term = raft_stable_data
+            .log
+            .last()
+            .expect("Log should always be at least length 1")
+            .term;
 
-        let request_vote_result = match timeout(Duration::from_secs(5), peer_connection.request_vote(RequestVoteInput {
-            term: raft_stable_data.current_term,
-            candidate_id: addr.to_string(),
-            last_log_index,
-            last_log_term,
-        })).await {
+        let request_vote_result = match timeout(
+            Duration::from_secs(5),
+            peer_connection.request_vote(RequestVoteInput {
+                term: raft_stable_data.current_term,
+                candidate_id: addr.to_string(),
+                last_log_index,
+                last_log_term,
+            }),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!(?e, ?peer_addr, "Call to request votes from peer timed out");
-                Err(CandidateError::RequestForVoteFailure(format!("Failed to request vote from peer {:?}", peer_addr)))?
+                Err(CandidateError::RequestForVoteFailure(format!(
+                    "Failed to request vote from peer {:?}",
+                    peer_addr
+                )))?
             }
         };
 
@@ -631,22 +645,19 @@ impl Candidate for PeerConnections {
             Ok(res) => {
                 let request_vote_output = res.into_inner();
                 Ok(request_vote_output.vote_granted)
-            },
+            }
             Err(e) => {
                 tracing::error!(?e, ?peer_addr, "Failed to request vote from peer");
-                Err(CandidateError::RequestForVoteFailure(format!("Failed to request vote from peer {:?}", peer_addr)))
+                Err(CandidateError::RequestForVoteFailure(format!(
+                    "Failed to request vote from peer {:?}",
+                    peer_addr
+                )))
             }
         }
     }
 
-    #[tracing::instrument(
-        skip_all,
-        ret
-    )]
-    async fn determine_election_result(
-        &self,
-        count_voted_yes: i64,
-    ) -> bool {
+    #[tracing::instrument(skip_all, ret)]
+    async fn determine_election_result(&self, count_voted_yes: i64) -> bool {
         if count_voted_yes > (self.peers.lock().await.len() / 2) as i64 {
             tracing::info!("Candidate now has enough votes to become a leader");
             true
@@ -655,5 +666,4 @@ impl Candidate for PeerConnections {
             false
         }
     }
-
 }

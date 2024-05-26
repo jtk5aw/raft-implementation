@@ -1,26 +1,26 @@
-use std::{fs, io};
-use std::future::Future;
-use std::io::Error;
-use std::path::PathBuf;
+use crate::helper::error;
+use crate::items::{GetRequest, PutRequest, PutResponse};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::http::uri::{Authority, Scheme};
 use hyper::{http, Request, Uri};
 use hyper_rustls::HttpsConnector;
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use prost::{DecodeError, Message};
 use rustls::{ClientConfig, RootCertStore};
+use std::future::Future;
+use std::io::Error;
+use std::path::PathBuf;
+use std::{fs, io};
 use tokio::io::AsyncWriteExt;
-use crate::helper::error;
-use crate::items::{GetRequest, PutRequest, PutResponse};
 
 // Errors
 #[derive(Debug)]
 pub enum ClientBuilderError {
     MissingRootCertPath,
     MissingBaseUri(String),
-    ClientBuilderIoError(std::io::Error)
+    ClientBuilderIoError(std::io::Error),
 }
 
 impl From<std::io::Error> for ClientBuilderError {
@@ -78,21 +78,18 @@ pub struct ClientBuilder {
     /// Root CA Cert path
     ca_cert_path: Option<PathBuf>,
     /// Base URI to make requests against
-    base_uri: Option<Uri>
+    base_uri: Option<Uri>,
 }
 
 // Traits
 pub trait Get {
-    fn get(
-        &self,
-        keys: GetRequest
-    ) -> impl Future<Output = Result<GetRequest, RisDbError>> + Send;
+    fn get(&self, keys: GetRequest) -> impl Future<Output = Result<GetRequest, RisDbError>> + Send;
 }
 
 pub trait Put {
     fn put(
         &self,
-        values: PutRequest
+        values: PutRequest,
     ) -> impl Future<Output = Result<PutResponse, RisDbError>> + Send;
 }
 
@@ -116,9 +113,9 @@ impl ClientBuilder {
     }
 
     pub async fn build(self) -> Result<RisDbClient, ClientBuilderError> {
-        let ca_cert_path = self.ca_cert_path.ok_or(
-            ClientBuilderError::MissingRootCertPath
-        )?;
+        let ca_cert_path = self
+            .ca_cert_path
+            .ok_or(ClientBuilderError::MissingRootCertPath)?;
         let tls = load_root_cert(&ca_cert_path)?;
         let parsed_uri = ParsedUri::parse_base_uri(self.base_uri)?;
         let https = hyper_rustls::HttpsConnectorBuilder::new()
@@ -143,8 +140,7 @@ impl ClientBuilder {
 }
 
 fn load_root_cert(path: &PathBuf) -> Result<ClientConfig, std::io::Error> {
-    let f = fs::File::open(path)
-        .map_err(|e| error(format!("failed to open {:?}: {}", path, e)))?;
+    let f = fs::File::open(path).map_err(|e| error(format!("failed to open {:?}: {}", path, e)))?;
     let mut rd = io::BufReader::new(f);
 
     let certs = rustls_pemfile::certs(&mut rd).collect::<Result<Vec<_>, _>>()?;
@@ -153,11 +149,9 @@ fn load_root_cert(path: &PathBuf) -> Result<ClientConfig, std::io::Error> {
     println!("added: {:?}, ignored: {:?}", result.0, result.1);
     println!("roots: {:?}", roots);
     // TLS client config using the custom CA store for lookups
-    Ok(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
-    )
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
 }
 
 struct ParsedUri {
@@ -168,15 +162,21 @@ struct ParsedUri {
 
 impl ParsedUri {
     fn parse_base_uri(base_uri: Option<Uri>) -> Result<ParsedUri, ClientBuilderError> {
-        let base_uri = base_uri.ok_or(
-            ClientBuilderError::MissingBaseUri("Required to provide a Base URI".to_string())
-        )?;
-        let authority = base_uri.authority().ok_or(
-            ClientBuilderError::MissingBaseUri("Provided Base URI has no Authority".to_string())
-        )?.to_owned();
-        let scheme = base_uri.scheme().ok_or(
-            ClientBuilderError::MissingBaseUri("Provided Base URI must have a scheme".to_string())
-        )?.to_owned();
+        let base_uri = base_uri.ok_or(ClientBuilderError::MissingBaseUri(
+            "Required to provide a Base URI".to_string(),
+        ))?;
+        let authority = base_uri
+            .authority()
+            .ok_or(ClientBuilderError::MissingBaseUri(
+                "Provided Base URI has no Authority".to_string(),
+            ))?
+            .to_owned();
+        let scheme = base_uri
+            .scheme()
+            .ok_or(ClientBuilderError::MissingBaseUri(
+                "Provided Base URI must have a scheme".to_string(),
+            ))?
+            .to_owned();
 
         Ok(ParsedUri {
             base_uri,
@@ -204,7 +204,8 @@ impl Get for RisDbClient {
             .header(hyper::header::HOST, self.authority.as_str())
             .body(Full::from(bytes))?;
 
-        let mut result = self.client
+        let mut result = self
+            .client
             .request(req)
             .await
             .map_err(|e| error(format!("Could not get: {:?}", e)))?;

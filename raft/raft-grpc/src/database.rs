@@ -1,21 +1,18 @@
-use std::future::Future;
-use std::io::{Error as IoError};
-use std::io::SeekFrom::Start;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::{try_join, task::JoinHandle};
 use tokio::runtime::{Builder, Runtime};
+use tokio::{task::JoinHandle, try_join};
 use tonic::transport::Server;
 
-use crate::raft::node::{RaftImpl, HeartbeatError, SetupError, Database};
+use crate::raft::node::{Database, HeartbeatError, RaftImpl, SetupError};
 use crate::raft_grpc::raft_internal_server::RaftInternalServer;
 
 #[derive(Debug)]
 pub struct ServerArgs {
     pub risdb_addr: SocketAddr,
     pub raft_addr: SocketAddr,
-    pub peer_args: Vec<PeerArgs>
+    pub peer_args: Vec<PeerArgs>,
 }
 
 #[derive(Debug)]
@@ -51,7 +48,7 @@ impl From<HeartbeatError> for StartUpError {
 }
 
 impl From<std::io::Error> for StartUpError {
-    fn from (err: std::io::Error) -> StartUpError {
+    fn from(err: std::io::Error) -> StartUpError {
         StartUpError::FailedToStartTokioRuntime(err)
     }
 }
@@ -62,20 +59,18 @@ impl From<String> for StartUpError {
     }
 }
 
-
 // Struct for setup
 #[derive(Debug)]
 pub struct RisDb {
     /// Tokio Runtime used by the database
     runtime: Runtime,
     /// Representation of the database that will server reads/writes
-    pub database: Arc<Database>
+    pub database: Arc<Database>,
 }
 
 // Public traits
 
 pub trait RisDbImpl {
-
     /// Performs initial setup to create an implementation.
     /// Will initialize the Tokio runtime for executing all
     /// tasks.
@@ -93,10 +88,7 @@ pub trait RisDbImpl {
     /// `Result`:
     /// `Ok(())` - Server has shut down
     /// `Err(StartupError)` - Server failed to start or irrecoverably failed a core function.
-    fn startup(
-        &self,
-        server_args: ServerArgs
-    ) -> JoinHandle<Result<(), StartUpError>>;
+    fn startup(&self, server_args: ServerArgs) -> JoinHandle<Result<(), StartUpError>>;
 }
 
 impl RisDbImpl for RisDb {
@@ -110,15 +102,12 @@ impl RisDbImpl for RisDb {
                 .enable_all()
                 .build()
                 .unwrap(),
-            database: Arc::new(Database::new(addr))
+            database: Arc::new(Database::new(addr)),
         }
     }
 
     #[tracing::instrument]
-    fn startup(
-        &self,
-        server_args: ServerArgs
-    ) -> JoinHandle<Result<(), StartUpError>> {
+    fn startup(&self, server_args: ServerArgs) -> JoinHandle<Result<(), StartUpError>> {
         // Get a handle to the underlying database struct so only that is moved and not self
         let database = self.database.clone();
         let addr = database.addr.clone();
@@ -136,24 +125,19 @@ impl RisDbImpl for RisDb {
 
             // NOTE: Task are spawned manually so that all this work is done on separate tokio tasks
             // and it can be done in parallel.
-            let raft_handle = tokio::spawn(
-                serve_raft(addr, raft)
-            );
-            let heartbeat_handle = tokio::spawn(
-                RaftImpl::heartbeat(
-                    server_args.raft_addr.to_string(),
-                    heartbeat_peer_connections,
-                    heartbeat_raft_state,
-                    heartbeat_volatile_raft_state,
-                )
-            );
-            let peer_connections_handle = tokio::spawn(
-                RaftImpl::connect_to_peers(server_args.raft_addr,
-                                           server_args.peer_args,
-                                           connect_to_peers_peer_connections,
-                                           connect_to_peers_raft_stable_state
-                )
-            );
+            let raft_handle = tokio::spawn(serve_raft(addr, raft));
+            let heartbeat_handle = tokio::spawn(RaftImpl::heartbeat(
+                server_args.raft_addr.to_string(),
+                heartbeat_peer_connections,
+                heartbeat_raft_state,
+                heartbeat_volatile_raft_state,
+            ));
+            let peer_connections_handle = tokio::spawn(RaftImpl::connect_to_peers(
+                server_args.raft_addr,
+                server_args.peer_args,
+                connect_to_peers_peer_connections,
+                connect_to_peers_raft_stable_state,
+            ));
 
             let result = try_join!(
                 // Should never return while the server is live
@@ -174,11 +158,7 @@ impl RisDbImpl for RisDb {
     }
 }
 
-async fn serve_raft(
-    addr: SocketAddr,
-    raft: RaftImpl
-) -> Result<(), StartUpError> {
-
+async fn serve_raft(addr: SocketAddr, raft: RaftImpl) -> Result<(), StartUpError> {
     Server::builder()
         .add_service(RaftInternalServer::new(raft))
         .serve(addr)
@@ -187,11 +167,9 @@ async fn serve_raft(
     Ok(())
 }
 
-async fn flatten<T, D>(
-    handle: JoinHandle<Result<T, D>>
-) -> Result<T, StartUpError>
-    where
-        StartUpError: From<D>
+async fn flatten<T, D>(handle: JoinHandle<Result<T, D>>) -> Result<T, StartUpError>
+where
+    StartUpError: From<D>,
 {
     match handle.await {
         Ok(Ok(result)) => Ok(result),
@@ -204,20 +182,18 @@ fn log_error(err: &StartUpError) {
     match err {
         StartUpError::FailedToSetup(failures) => {
             tracing::error!("Failed to connect to peers: {:?}", failures);
-        },
+        }
         StartUpError::FailedToStartServer(err) => {
             tracing::error!("Failed to start the server: {:?}", err);
-        },
+        }
         StartUpError::FailedToHeartbeat(err) => {
             tracing::error!("Failed to heartbeat: {:?}", err);
-        },
+        }
         StartUpError::CustomError(err) => {
             tracing::error!("Most likely a concurrency issue: {:?}", err);
-        },
+        }
         StartUpError::FailedToStartTokioRuntime(err) => {
             tracing::error!("Tokio runtime failed to start: {:?}", err);
         }
     };
 }
-
-
