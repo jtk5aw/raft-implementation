@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The authority of our URL will be the hostname of the httpbin remote
     let authority = url.authority().unwrap().clone();
 
-    // TODO TODO TODO: Condense this into one
+    // TODO: Condense this into one
     let mut res = if true {
         let client: Client<_, String> = Client::builder(TokioExecutor::new())
             .build(https);

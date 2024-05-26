@@ -6,7 +6,8 @@ import "shared.proto";
 // Raft paper being used as reference: https://raft.github.io/raft.pdf
 
 service RaftInternal {
-  // TODO: Flesh out this API
+  // TODO: Consider removing these altogether. Shouldn't really need to call GetValue/ProposeValue as gRPC calls
+  //  the input and output objects should stay though those are definitely useful
   rpc ProposeValue (ProposeValueInput) returns (ProposeValueOutput);
   rpc GetValue (GetValueInput) returns (GetValueOutput);
 
@@ -96,7 +97,6 @@ message AppendEntriesOutput {
   // Term for leader to update with
   int64 term = 1;
   // If the response was successful or not
-  // TODO: Add more details to what that actually means
   bool success = 2;
 }
 

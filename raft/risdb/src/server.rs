@@ -1,36 +1,34 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::time::sleep;
 
-use raft_grpc::server::{PeerArgs, RisDb, RisDbSetup, ServerArgs};
+use raft_grpc::database::{PeerArgs, RisDb, RisDbImpl, ServerArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     setup_tracing()?;
 
-    // Get workspace base
-    let output = std::process::Command::new(env!("CARGO"))
-        .arg("locate-project")
-        .arg("--workspace")
-        .arg("--message-format=plain")
-        .output()
-        .unwrap()
-        .stdout;
-    let cargo_path = Path::new(std::str::from_utf8(&output).unwrap().trim());
-    let workspace_base = cargo_path.parent().unwrap().to_path_buf();
-
     let args: Vec<_> = env::args().collect();
     let my_args = args.get(1).unwrap();
-    let server_args = parse_server_args(workspace_base, my_args.to_string())?;
+    let server_args = parse_server_args(my_args.to_string())?;
 
-    let ris_db = RisDb { };
+    let ris_db = RisDb::new(server_args.raft_addr);
+    let _database = ris_db.database.clone();
 
-    let _ = ris_db.startup(server_args).await;
+    let _handle = ris_db.startup(server_args);
 
-    Ok(())
+    // TODO: In case I get sidetracked by other stuff, I want that thin layer in front to be
+    //  the stuff in risdb-hyper for now. Also ideally the raft stuff would communicate with each other 
+    //  via TLS but I was at my limit trying to make that work with tonic   
+    loop {
+        // Imagine this is the hyper server
+        sleep(Duration::from_secs(5));
+    }
 }
 
-fn parse_server_args(workspace_base: PathBuf, arg: String) -> Result<ServerArgs, Box<dyn std::error::Error>> {
+fn parse_server_args(arg: String) -> Result<ServerArgs, Box<dyn std::error::Error>> {
     let mut pairs = arg.split(";");
 
     let mut this_server_arg = pairs.next()

@@ -20,7 +20,7 @@ impl From<tonic::transport::Error> for RisDbSetupError {
 // Structs
 
 #[derive(Debug)]
-pub struct RisDbImpl {
+pub struct RisDbToDelete {
     // Socket Address of the current server
     pub addr: SocketAddr,
     // Client to make loopback calls to the RaftImpl on this same server. Cloning this is cheap
@@ -34,12 +34,12 @@ pub struct RaftClient {
 
 
 // Implementations
-impl RisDbImpl {
+impl RisDbToDelete {
     /**
      * Creates a new RisDbImpl struct
      */
-    pub fn new(addr: SocketAddr) -> RisDbImpl {
-        RisDbImpl { 
+    pub fn new(addr: SocketAddr) -> RisDbToDelete {
+        RisDbToDelete { 
             addr: addr,
             raft_client: RaftClient { client: Arc::new(Mutex::new(None)) }
         }
@@ -85,7 +85,7 @@ impl RaftClient {
 }
 
 #[tonic::async_trait] 
-impl RisDb for RisDbImpl {
+impl RisDb for RisDbToDelete {
     #[tracing::instrument(
         skip_all,
         name = "RisDb:put",
@@ -122,7 +122,10 @@ impl RisDb for RisDbImpl {
 
         Ok(Response::new(reply))
     }
-
+    
+    //  TODO: I plan to completely remove this whole implementation and replace it with a lighter weight raw hyper frontend
+    //   for receiving requests. I probably won't go too crazy with that as far as supporting backwards compatibility (i.e 
+    //   it will accept one type of payload and one type of payload only) 
     #[tracing::instrument(
         skip_all,
         name = "RisDb:get",

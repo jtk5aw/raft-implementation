@@ -91,7 +91,6 @@ pub struct RequestVotesResult {
 
 // Traits
 
-// TODO: Determine how to prevent "public" from using this
 #[tonic::async_trait]
 pub trait PeerSetup {
     /**
@@ -149,6 +148,7 @@ mod peer_setup_tests {
     use tonic::transport::Server;
 
     use crate::{raft_grpc::raft_internal_server::RaftInternalServer, raft::node::RaftImpl};
+    use crate::raft::node::Database;
 
     use super::*;
 
@@ -160,7 +160,7 @@ mod peer_setup_tests {
 
         tokio::spawn(async move {
             let _ = Server::builder()
-                .add_service(RaftInternalServer::new(RaftImpl::new(peer_addr)))
+                .add_service(RaftInternalServer::new(RaftImpl::new(Arc::new(Database::new(peer_addr)))))
                 .serve(peer_addr)
                 .await;
         });
@@ -229,9 +229,8 @@ mod peer_setup_tests {
     }
 }
 
-// TODO: Determine how to prevent "public" from using this
 #[tonic::async_trait]
-pub trait LeaderActions {
+pub trait Leader {
     /**
      * Adds the provided LogEntry values to the logs of self and peers. Also checks if
      * data was shared to enough peers to be considered committed.
@@ -296,7 +295,7 @@ pub trait LeaderActions {
 }
 
 #[tonic::async_trait]
-impl LeaderActions for PeerConnections {
+impl Leader for PeerConnections {
     #[tracing::instrument(
         skip_all,
         ret,
@@ -451,7 +450,7 @@ impl LeaderActions for PeerConnections {
             .as_mut()
             .ok_or_else(|| LeaderError::NoLeaderStateFound("No leader state found".to_owned()))?;
 
-        // TODO TODO TODO: A bug that can happen is two nodes are elected leaders for two separate terms
+        // TODO: A bug that can happen is two nodes are elected leaders for two separate terms
         // they can both begin trying to make requests to each other to update logs with heartbeats
         // and if the timing is unlucky they will just both keep sending requests to each other
         // and nothing will happen cause the request will always time out because it holds the lock on its
@@ -512,7 +511,7 @@ impl LeaderActions for PeerConnections {
 }
 
 #[tonic::async_trait]
-pub trait CandidateActions {
+pub trait Candidate {
 
     /**
      * Requests votes from peers. Asynchronous calls to all peers are made. Tallies up results and determines
@@ -555,7 +554,7 @@ pub trait CandidateActions {
 }
 
 #[tonic::async_trait]
-impl CandidateActions for PeerConnections {
+impl Candidate for PeerConnections {
     #[tracing::instrument(
         skip_all,
         ret,

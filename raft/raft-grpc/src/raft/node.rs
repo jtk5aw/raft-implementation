@@ -1,5 +1,6 @@
 use std::cmp::{Ordering, min};
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -9,18 +10,18 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, MissedTickBehavior, interval};
 use tonic::{Request, Response, Status};
 use crate::raft::data_store::{DataStore, StateMachine};
-use crate::raft::peer::{PeerConnections, PeerSetup, StateMachineError, LeaderActions, CandidateActions};
+use crate::raft::peer::{PeerConnections, PeerSetup, StateMachineError, Leader, Candidate};
 use crate::raft::state::{RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState, RaftNodeType};
 use crate::raft_grpc::{AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput, PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput};
 use crate::raft_grpc::log_entry::LogAction;
 use crate::raft_grpc::raft_internal_server::RaftInternal;
-use crate::server::PeerArgs;
+use crate::database::PeerArgs;
 use crate::shared::Value;
 
 // Constants
 const HEARTBEAT_INTERVAL: u64 = 500;
 
-// Errors TODO: Try to make it so this doesn't have to be shared at the top level
+// Errors
 
 #[derive(Debug)]
 pub enum HeartbeatError {
@@ -46,70 +47,112 @@ pub enum SetupError {
 }
 
 #[derive(Debug)]
-pub struct RaftImpl {
-    // Socket Address of the current server
-    pub addr: SocketAddr,
-    // List of paths to other Raft Nodes. Also contains leader state
-    pub peer_connections: PeerConnections,
-    // Stable State of the Raft Node (persisted to disk) // TODO: persist this to disk
-    pub state: RaftStableState,
-    // Volatile State of the Raft Node (not persisted to disk)
-    pub volatile_state: RaftVolatileState,
-    // Data map TODO: Update this to some more interesting data store (maybe)
-    pub data_store: DataStore,
+pub enum ReadError {}
+#[derive(Debug)]
+pub enum WriteError {
+    NotTheLeader,
+    FailedToParseLogs(StateMachineError),
+    FailedToCommunicateToMajority(StateMachineError),
+    FailedToUpdateStateMachine(StateMachineError),
 }
 
+// TODO: Take stock of all the Arcs I'm using and see if they can be compressed
+// and some can be removed.
+
+#[derive(Debug)]
+pub struct Database {
+    /// Socket Address of the current server
+    pub addr: SocketAddr,
+    /// List of paths to other Raft Nodes. Also contains leader state
+    pub(crate) peer_connections: PeerConnections,
+    /// Stable State of the Raft Node (persisted to disk) // TODO: persist this to disk
+    pub(crate) state: RaftStableState,
+    /// Volatile State of the Raft Node (not persisted to disk)
+    pub(crate) volatile_state: RaftVolatileState,
+    /// Data map TODO: Update this to some more interesting data store (maybe)
+    pub(crate) data_store: DataStore,
+}
+
+#[tonic::async_trait]
+pub trait ReadAndWrite {
+    /// Takes the provided `GetValueInput` and uses it to construct a `GetValueOutput`
+    /// object
+    ///
+    /// get_value_input: Contains the set of keys to retrieve value for
+    ///
+    /// WARNING: As of right now no `ReadError` will ever be returned. If I want to update this in
+    /// the future to be more interesting it will need to be able to return errors so I'm adding it to
+    /// the api now.
+    ///
+    /// Returns:
+    /// Ok(GetValueOutput): `Value`s corresponding to the provided keys if they exist
+    /// Err(ReadError): `ReadError` representing the issue encountered while trying to
+    ///                  retrieve the provided keys.
+    async fn get_value(
+        &self,
+        get_value_input: &GetValueInput
+    ) -> Result<GetValueOutput, ReadError> ;
+
+    async fn propose_value(
+        &self,
+        propose_value_input: ProposeValueInput
+    ) -> Result<ProposeValueOutput, WriteError>;
+}
+
+#[tonic::async_trait]
+trait Follower {
+    /**
+     * Takes the value provided from a peer and applies it to the log.
+     * Before doing so it truncates the log from the provided Previous Log Index + 1.
+     * This will also update the state machine if the commit index has increased.
+     *
+     * Returns:
+     * Ok(AppendEntriesOutput): Output determine if update was successful.
+     * Err(StateMachineError): The error faced when attempting to modify the state machine.
+     */
+    async fn make_update_from_peer(
+        &self,
+        raft_stable_data: &mut RaftStableData,
+        raft_volatile_data: &mut RaftVolatileData,
+        append_entries_input: AppendEntriesInput,
+    ) -> Result<AppendEntriesOutput, StateMachineError>;
+
+    /**
+     * Adds the provided LogEntry values to own servers logs.
+     */
+    async fn write_to_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        log_entries: Vec<LogEntry>
+    );
+}
+
+
+#[derive(Debug)]
+pub struct RaftImpl {
+    /// Representation of the database that this node is responsible for maintaining
+    pub inner: Arc<Database>
+}
 impl RaftImpl {
     /**
      * Creates a new RaftImpl struct
      */
-    pub fn new(addr: SocketAddr) -> RaftImpl {
+    pub fn new(inner: Arc<Database>) -> RaftImpl {
         RaftImpl {
-            addr,
-            peer_connections: PeerConnections {
-                peers: Arc::new(Mutex::new(HashMap::new()))
-            },
-            state: RaftStableState {
-                raft_data: Arc::new(Mutex::new(RaftStableData {
-                    node_type: RaftNodeType::StartingUp,
-                    current_term: 0,
-                    voted_for: None,
-                    // Add a dummy value to the start of the log that should NEVER actually be applied. But starting from
-                    // 0 causes problems cause last applied and commit index also start at 0
-                    // TODO: Modify the type of this so you can literally only append to it. Make it so
-                    // this first entry can never be overwritten
-                    log: vec![
-                        LogEntry {
-                            log_action: LogAction::Noop.into(),
-                            value: None,
-                            term: -1
-                        }
-                    ],
-                })),
-            },
-            volatile_state: RaftVolatileState {
-                raft_data: Arc::new(Mutex::new(RaftVolatileData {
-                    commit_index: 0,
-                    last_applied: 0,
-                })),
-            },
-            data_store: DataStore {
-                data: Arc::new(Mutex::new(HashMap::new())),
-            }
+            inner,
         }
     }
 
-    /**
-     * Function used to heartbeat on this node. Behavior of the heartbeat is
-     * different depending on the RaftNodeType of th enode.
-     *
-     * `Result`
-     * `Ok(())` - Stopped heartbeating
-     * `Error(HeartbeatError)` - Failed to complete heartbeat for some reason.
-     */
+     /// Function used to heartbeat on this node. Behavior of the heartbeat is
+     /// different depending on the RaftNodeType of th enode.
+     ///
+     /// `Result`
+     ///`Ok(())` - Stopped heartbeating
+     /// `Error(HeartbeatError)` - Failed to complete heartbeat for some reason.
+     ///
     // TODO: This heartbeat thread leads to one massing and basically impossible
-    // to debug span. If want to set up otel or something like it this should be tweaked
-    // to make it's own spans on every "tick"
+    //  to debug span. If want to set up otel or something like it this should be tweaked
+    //  to make it's own spans on every "tick"
     #[tracing::instrument(skip_all, ret, err(Debug))]
     pub async fn heartbeat(
         addr: String,
@@ -283,114 +326,17 @@ impl RaftImpl {
 
 }
 
-#[tonic::async_trait]
-pub trait FollowerActions {
-    /**
-     * Takes the value provided from a peer and applies it to the log.
-     * Before doing so it truncates the log from the provided Previous Log Index + 1.
-     * This will also update the state machine if the commit index has increased.
-     *
-     * Returns:
-     * Ok(AppendEntriesOutput): Output determine if update was successful.
-     * Err(StateMachineError): The error faced when attempting to modify the state machine.
-     */
-    async fn make_update_from_peer(
-        &self,
-        raft_stable_data: &mut RaftStableData,
-        raft_volatile_data: &mut RaftVolatileData,
-        append_entries_input: AppendEntriesInput,
-    ) -> Result<AppendEntriesOutput, StateMachineError>;
-
-    /**
-     * Adds the provided LogEntry values to own servers logs.
-     */
-    async fn write_to_logs(
-        &self,
-        stable_data: &mut RaftStableData,
-        log_entries: Vec<LogEntry>
-    );
-}
-
-#[tonic::async_trait]
-impl FollowerActions for RaftImpl {
-
-    #[tracing::instrument(
-        skip_all,
-        ret,
-        err(Debug)
-    )]
-    async fn make_update_from_peer(
-        &self,
-        raft_stable_data: &mut RaftStableData,
-        raft_volatile_data: &mut RaftVolatileData,
-        append_entries_input: AppendEntriesInput,
-    ) -> Result<AppendEntriesOutput, StateMachineError> {
-        tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
-
-        raft_stable_data.log.truncate((append_entries_input.prev_log_index + 1) as usize);
-
-        tracing::info!("Appending new entries to the log");
-
-        self.write_to_logs(
-            raft_stable_data,
-            append_entries_input.entries
-        ).await;
-
-        if raft_volatile_data.commit_index < append_entries_input.leader_commit {
-            tracing::info!("Updating commit index");
-            raft_volatile_data.commit_index = min(
-                (raft_stable_data.log.len() - 1) as i64,
-                append_entries_input.leader_commit
-            );
-        }
-
-        tracing::info!("Attempting to update state machine");
-
-        match self.update_state_machine(
-            raft_stable_data,
-            raft_volatile_data
-        ).await {
-            Ok(num_updates) => {
-                tracing::info!(?num_updates, "Successful updated the state machine");
-                Ok(AppendEntriesOutput {
-                    success: true,
-                    term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
-                })
-            },
-            Err(err) => {
-                tracing::error!(err = ?err, "Failed to update the state machine");
-                Err(err)
-            }
-        }
-    }
-
-    async fn write_to_logs(
-        &self,
-        stable_data: &mut RaftStableData,
-        log_entries: Vec<LogEntry>
-    ) {
-        tracing::info!("Writing new value to own log");
-
-        log_entries
-            .iter()
-            .for_each(|log_entry| {
-                stable_data.log.push(log_entry.to_owned());
-            });
-    }
-}
-
 // TODO: ADD AUTH TO THESE CALLS SO THAT IT CAN BE PUBLICLY EXPOSED WITHOUT ISSUE
 // Do it using a middleware/extension and probably easiest to just do with an API Key for now.
 // This also  might be an option: https://developer.hashicorp.com/vault/docs/auth/aws
 // TODO: Add redirects to the writer. For now assumes that the outside client will only make put requests to the
 // writer. Which make not be true
-// TODO: Add support for other operations when writing to the log.
-// TODO: Make almost all of these logs be debug instead of INFO. Have like 1-2 info logs per request and that's it cause right now its waaaaaay
-// too much in the default case.
 #[tonic::async_trait]
 impl RaftInternal for RaftImpl {
     // TODO: Return a status error when maybe it makes more sense to return Ok with success: false?
     //  or maybe consider removing that boolean and just return certain status failures in success: false case instead
+    #[allow(useless_deprecated)]
+    #[deprecated]
     #[tracing::instrument(
         skip_all,
         name = "Raft:propose_value",
@@ -407,70 +353,10 @@ impl RaftInternal for RaftImpl {
         let request_id = propose_value_input.request_id.clone();
         tracing::Span::current().record("request_id", &request_id);
 
-        tracing::info!("Locking state");
-
-        let mut raft_stable_data = self.state.raft_data.lock().await;
-        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
-
-        tracing::info!("Checking if node is leader");
-
-        match raft_stable_data.node_type {
-            RaftNodeType::Leader => {
-                tracing::error!("Node is leader, continue");
-            },
-            _ => {
-                tracing::info!("Node is not the leader cancel request");
-                return Err(Status::failed_precondition("Node is not the leader".to_owned()));
-            }
-        }
-
-        tracing::info!("Converting input data to log entries");
-
-        let log_entries = parse_log_entries(
-            raft_stable_data.deref(),
-            propose_value_input
-        ).await
-            .map_err(|err| {
-                tracing::error!(err = ?err, "Failed to properly parse logs");
-                Status::internal("Failed to parse provided input".to_owned())
-            })?;
-
-        tracing::info!("Add new values to own logs and to peer logs");
-
-
-        match self.peer_connections.write_and_share_logs(
-            self.addr.to_string(),
-            raft_stable_data.deref_mut(),
-            raft_volatile_data.deref_mut(),
-            log_entries
-        ).await {
-            Ok(_) => {
-                tracing::info!("Successfully communicated value to majority of peers");
-                Ok(())
-            },
-            Err(err) => {
-                tracing::error!(err = ?err, "Failed to communicate value to majority of peers");
-                Err(Status::internal("Failed to write provided values".to_owned()))
-            }
-        }?;
-
-        tracing::info!("Applying any necessary changes to the state machine");
-
-        match self.update_state_machine(
-            raft_stable_data.deref(),
-            raft_volatile_data.deref_mut()
-        ).await {
-            Ok(num_updates) => {
-                tracing::info!(?num_updates, "Successful updated the state matchine");
-                Ok(())
-            },
-            Err(err) => {
-                tracing::error!(err = ?err, "Failed to update the state matching");
-                Err(Status::internal("Failed to apply provided values".to_owned()))
-            }
-        }?;
-
-        tracing::info!("Returning result to client");
+        let _ = self.inner.propose_value(propose_value_input).await.map_err(|err| {
+            tracing::error!(?err, "Failed to propose the new value");
+            Status::internal(format!("Failed to write the new values due to: {:?}", err))
+        })?;
 
         let reply = ProposeValueOutput {
             request_id,
@@ -480,6 +366,8 @@ impl RaftInternal for RaftImpl {
         Ok(Response::new(reply))
     }
 
+    #[allow(useless_deprecated)]
+    #[deprecated]
     #[tracing::instrument(
         skip_all,
         name = "Raft:get_value",
@@ -495,25 +383,15 @@ impl RaftInternal for RaftImpl {
         let get_value_input = request.into_inner();
         tracing::Span::current().record("request_id", &get_value_input.request_id);
 
-        let values = {
-            let data = self.data_store.data.lock().await;
-
-            get_value_input.keys
-                .iter()
-                .map(|key| {
-                    data.get_key_value(key)
-                })
-                .filter(|key_value_pair| key_value_pair.is_some())
-                .map(|key_value_pair| Value {
-                    key: key_value_pair.unwrap().0.to_owned(),
-                    value: key_value_pair.unwrap().1.to_owned()
-                })
-                .collect()
-        };
+        let output = self.inner.get_value(
+            &get_value_input
+        ).await.map_err(|err|
+            Status::internal(format!("Failed to get value from the state machine: {:?}", err))
+        )?;
 
         let reply = GetValueOutput {
             request_id: get_value_input.request_id,
-            values
+            values: output.values
         };
 
         Ok(Response::new(reply))
@@ -534,7 +412,7 @@ impl RaftInternal for RaftImpl {
         tracing::Span::current().record("candidate_id", &request_vote_input.candidate_id);
         tracing::Span::current().record("requested_term", &request_vote_input.term);
 
-        let raft_stable_state = self.state.raft_data.lock().await;
+        let raft_stable_state = self.inner.state.raft_data.lock().await;
 
         // Candidate is requesting votes on an old term. Vote no
         if raft_stable_state.current_term > request_vote_input.term {
@@ -599,8 +477,8 @@ impl RaftInternal for RaftImpl {
 
         tracing::info!("Locking state to append entries");
 
-        let mut raft_stable_data = self.state.raft_data.lock().await;
-        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
+        let mut raft_stable_data = self.inner.state.raft_data.lock().await;
+        let mut raft_volatile_data = self.inner.volatile_state.raft_data.lock().await;
 
         tracing::info!("Checking if provided term is accepted");
 
@@ -637,7 +515,7 @@ impl RaftInternal for RaftImpl {
         raft_stable_data.node_type = RaftNodeType::Follower(true);
 
         tracing::info!("Updating Logs");
-        let output = self.make_update_from_peer(
+        let output = self.inner.make_update_from_peer(
             raft_stable_data.deref_mut(),
             raft_volatile_data.deref_mut(),
             append_entries_input
@@ -660,10 +538,230 @@ impl RaftInternal for RaftImpl {
     ) -> Result<Response<PingOutput>, Status> {
 
         let response = PingOutput {
-            responder: self.addr.port().to_string(),
+            responder: self.inner.addr.port().to_string(),
         };
 
         Ok(Response::new(response))
+    }
+}
+
+
+impl Database {
+    pub fn new(addr: SocketAddr) -> Self {
+        Database {
+            addr,
+            peer_connections: PeerConnections {
+                peers: Arc::new(Mutex::new(HashMap::new()))
+            },
+            state: RaftStableState {
+                raft_data: Arc::new(Mutex::new(RaftStableData {
+                    node_type: RaftNodeType::StartingUp,
+                    current_term: 0,
+                    voted_for: None,
+                    // Add a dummy value to the start of the log that should NEVER actually be applied. But starting from
+                    // 0 causes problems cause last applied and commit index also start at 0
+                    // TODO: Modify the type of this so you can literally only append to it. Make it so
+                    // this first entry can never be overwritten
+                    log: vec![
+                        LogEntry {
+                            log_action: LogAction::Noop.into(),
+                            value: None,
+                            term: -1
+                        }
+                    ],
+                })),
+            },
+            volatile_state: RaftVolatileState {
+                raft_data: Arc::new(Mutex::new(RaftVolatileData {
+                    commit_index: 0,
+                    last_applied: 0,
+                })),
+            },
+            data_store: DataStore {
+                data: Arc::new(Mutex::new(HashMap::new()))
+            }
+        }
+    }
+}
+
+
+#[tonic::async_trait]
+impl Follower for Database {
+
+    #[tracing::instrument(
+    skip_all,
+    ret,
+    err(Debug)
+    )]
+    async fn make_update_from_peer(
+        &self,
+        raft_stable_data: &mut RaftStableData,
+        raft_volatile_data: &mut RaftVolatileData,
+        append_entries_input: AppendEntriesInput,
+    ) -> Result<AppendEntriesOutput, StateMachineError> {
+        tracing::info!("Clear the log from the provided index on of any entries not matching the provided term");
+
+        raft_stable_data.log.truncate((append_entries_input.prev_log_index + 1) as usize);
+
+        tracing::info!("Appending new entries to the log");
+
+        self.write_to_logs(
+            raft_stable_data,
+            append_entries_input.entries
+        ).await;
+
+        if raft_volatile_data.commit_index < append_entries_input.leader_commit {
+            tracing::info!("Updating commit index");
+            raft_volatile_data.commit_index = min(
+                (raft_stable_data.log.len() - 1) as i64,
+                append_entries_input.leader_commit
+            );
+        }
+
+        tracing::info!("Attempting to update state machine");
+
+        match self.data_store.update_state_machine(
+            raft_stable_data,
+            raft_volatile_data
+        ).await {
+            Ok(num_updates) => {
+                tracing::info!(?num_updates, "Successful updated the state machine");
+                Ok(AppendEntriesOutput {
+                    success: true,
+                    term: 0, // TODO: Make this handle term properly and confirm other aspects of this method handle term correctly
+                })
+            },
+            Err(err) => {
+                tracing::error!(err = ?err, "Failed to update the state machine");
+                Err(err)
+            }
+        }
+    }
+
+    async fn write_to_logs(
+        &self,
+        stable_data: &mut RaftStableData,
+        log_entries: Vec<LogEntry>
+    ) {
+        tracing::info!("Writing new value to own log");
+
+        log_entries
+            .iter()
+            .for_each(|log_entry| {
+                stable_data.log.push(log_entry.to_owned());
+            });
+    }
+}
+
+#[tonic::async_trait]
+impl ReadAndWrite for Database {
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
+    async fn get_value(
+        &self,
+        get_value_input: &GetValueInput
+    ) -> Result<GetValueOutput, ReadError> {
+        let data = self.data_store.data.lock().await;
+
+        let values = get_value_input.keys
+            .iter()
+            .map(|key| {
+                data.get_key_value(key)
+            })
+            .filter(|key_value_pair| key_value_pair.is_some())
+            .map(|key_value_pair| Value {
+                key: key_value_pair.unwrap().0.to_owned(),
+                value: key_value_pair.unwrap().1.to_owned()
+            })
+            .collect();
+
+        Ok(GetValueOutput {
+            request_id: get_value_input.request_id.clone(),
+            values
+        })
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        ret,
+        err(Debug)
+    )]
+    async fn propose_value(
+        &self,
+        propose_value_input: ProposeValueInput
+    ) -> Result<ProposeValueOutput, WriteError> {
+
+        tracing::debug!("Locking state");
+
+        let request_id = propose_value_input.request_id.clone();
+        let mut raft_stable_data = self.state.raft_data.lock().await;
+        let mut raft_volatile_data = self.volatile_state.raft_data.lock().await;
+
+        tracing::debug!("Checking if node is leader");
+
+        match raft_stable_data.node_type {
+            RaftNodeType::Leader => {
+                tracing::debug!("Node is leader, continue");
+            },
+            _ => {
+                tracing::error!("Node is not the leader cancel request");
+                return Err(WriteError::NotTheLeader);
+            }
+        }
+
+        tracing::debug!("Converting input data to log entries");
+
+        let log_entries = parse_log_entries(
+            raft_stable_data.deref(),
+            propose_value_input
+        ).await.map_err(|err| {
+            tracing::error!(err = ?err, "Failed to properly parse logs");
+            WriteError::FailedToParseLogs(err)
+        })?;
+
+        tracing::debug!("Add new values to own logs and to peer logs");
+
+        match self.peer_connections.write_and_share_logs(
+            self.addr.to_string(),
+            raft_stable_data.deref_mut(),
+            raft_volatile_data.deref_mut(),
+            log_entries
+        ).await {
+            Ok(_) => {
+                tracing::debug!("Successfully communicated value to majority of peers");
+                Ok(())
+            },
+            Err(err) => {
+                tracing::error!(err = ?err, "Failed to communicate value to majority of peers");
+                Err(WriteError::FailedToCommunicateToMajority(err))
+            }
+        }?;
+
+        tracing::debug!("Applying any necessary changes to the state machine");
+
+        match self.data_store.update_state_machine(
+            raft_stable_data.deref(),
+            raft_volatile_data.deref_mut()
+        ).await {
+            Ok(num_updates) => {
+                tracing::debug!(?num_updates, "Successful updated the state machine");
+                Ok(())
+            },
+            Err(err) => {
+                tracing::error!(err = ?err, "Failed to update the state machine");
+                Err(WriteError::FailedToUpdateStateMachine(err))
+            }
+        }?;
+
+        tracing::debug!("Returning result to client");
+
+        Ok(ProposeValueOutput {
+            request_id,
+            successful: true
+        })
     }
 }
 
