@@ -1,9 +1,27 @@
-use risdb_hyper::items::GetRequest;
-use risdb_hyper::{get_workspace_base_dir, ClientBuilder, Get};
+use tracing::Level;
+use risdb_hyper::{get_workspace_base_dir, ClientBuilder, Get, Put};
+use risdb_hyper::structs::{GetRequest, PutRequest, Value};
+
+fn setup_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // construct a subscriber that prints formatted traces to stdout
+    let subscriber = tracing_subscriber::fmt()
+        .compact()
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(false)
+        .with_target(false)
+        .with_max_level(Level::INFO)
+        .finish();
+    // use that subscriber to process traces emitted after this point
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // This is where we will setup our HTTP client requests.
+    setup_tracing()?;
 
+    // This is where we will setup our HTTP client requests.
     let base_dir = get_workspace_base_dir();
     // Load root cert
     let base_cert_path = base_dir.join("certs").join("ca.cert");
@@ -18,14 +36,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await
         .unwrap();
 
-    let result = client
+    let put_result = client
+        .put(PutRequest {
+            request_id: "0-0-0-0".to_string(),
+            values: vec![
+                Value {
+                    key: "key".to_string(),
+                    value: "value".to_string(),
+                }
+            ]
+        })
+        .await;
+
+    println!("{:?}", put_result);
+
+    let get_result = client
         .get(GetRequest {
             request_id: "1-1-1-1".to_string(),
             keys: vec!["key1".to_string()],
         })
         .await;
 
-    println!("{:?}", result);
+    println!("{:?}", get_result);
 
     Ok(())
 }

@@ -3,7 +3,7 @@ mod client;
 mod helper;
 mod server;
 
-mod items {
+pub mod structs {
     include!(concat!(env!("OUT_DIR"), "/risdb.proto.rs"));
 }
 

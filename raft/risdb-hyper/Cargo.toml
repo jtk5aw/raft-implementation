@@ -20,7 +20,11 @@ rustls = "0.23"
 rustls-pemfile = "2.1.2"
 rustls-pki-types = "1"
 log = "0.4.20"
+tracing = "0.1.37"
 prost-build = "0.12.6"
+
+[dev-dependencies]
+tracing-subscriber = "0.3.18"
 
 [build-dependencies]
 prost-build = "0.12"
