@@ -97,7 +97,7 @@ pub struct ClientBuilder {
 /// TODO: Update this to do response too once that's implemented cause there will be duplicate code there.
 pub trait CreateRequest<T>
 where
-    T: prost::Message
+    T: prost::Message,
 {
     fn create_request(&self, input: T) -> Result<Request<Full<Bytes>>, http::Error>;
 
@@ -158,10 +158,7 @@ impl ClientBuilder {
             .http2_only(true)
             .build(https);
 
-        Ok(RisDbClient {
-            client,
-            endpoints,
-        })
+        Ok(RisDbClient { client, endpoints })
     }
 }
 
@@ -192,31 +189,30 @@ impl ParsedUri {
             if !path_and_query.as_str().eq("/") {
                 debug!("Bad Path/Query: {:?}", &path_and_query);
                 return Err(ClientBuilderError::MissingBaseUri(
-                    "Provided Base URI can not have a path and query section".to_string()
-                ))
+                    "Provided Base URI can not have a path and query section".to_string(),
+                ));
             }
         }
 
-        let authority = parts.authority
+        let authority = parts
+            .authority
             .ok_or(ClientBuilderError::MissingBaseUri(
                 "Provided Base URI has no Authority".to_string(),
             ))?
             .to_owned();
-        let scheme = parts.scheme
+        let scheme = parts
+            .scheme
             .ok_or(ClientBuilderError::MissingBaseUri(
                 "Provided Base URI must have a scheme".to_string(),
             ))?
             .to_owned();
 
-        Ok(ParsedUri {
-            authority,
-            scheme,
-        })
+        Ok(ParsedUri { authority, scheme })
     }
 }
 
 impl Endpoints {
-    fn initialize(uri: Option<Uri>) -> Result<Endpoints, ClientBuilderError>{
+    fn initialize(uri: Option<Uri>) -> Result<Endpoints, ClientBuilderError> {
         let uri_to_parse = uri.ok_or(ClientBuilderError::MissingBaseUri(
             "Required to provide a Base URI".to_string(),
         ))?;

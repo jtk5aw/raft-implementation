@@ -1,4 +1,5 @@
 use super::helper::error;
+use crate::structs::{GetRequest, PutRequest};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Bytes, Incoming};
@@ -6,21 +7,20 @@ use hyper::service::Service;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
+use prost::{DecodeError, Message};
+use raft_grpc::database::RisDb;
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::{fs, io};
-use std::future::Future;
-use std::pin::Pin;
-use prost::{DecodeError, Message};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
 use tracing::info;
-use raft_grpc::database::RisDb;
-use crate::structs::{GetRequest, PutRequest};
 
 pub async fn run(
     addr: SocketAddr,
@@ -41,7 +41,7 @@ pub async fn run(
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     let svc = RisDbSvc {
-        risdb: Arc::new(database)
+        risdb: Arc::new(database),
     };
 
     // We start a loop to continuously accept incoming connections
@@ -106,14 +106,14 @@ impl Service<Request<Incoming>> for RisDbSvc {
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let cloned = self.clone();
-        Box::pin( async move { cloned.serve_request(req).await })
+        Box::pin(async move { cloned.serve_request(req).await })
     }
 }
 
 impl RisDbSvc {
     async fn serve_request(
         &self,
-        req: Request<Incoming>
+        req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
         match (req.method(), req.uri().path()) {
             (&Method::POST, "/get") => self.respond::<GetRequest>(req).await,
@@ -128,12 +128,8 @@ impl RisDbSvc {
     }
 }
 
-
 trait Handle<T> {
-    async fn handle(
-        &self,
-        input: T
-    ) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error>;
+    async fn handle(&self, input: T) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error>;
 }
 
 // TODO: Figure out what to do with these. I feel like the regular response
@@ -145,7 +141,7 @@ enum PutError {}
 impl Handle<GetRequest> for RisDbSvc {
     async fn handle(
         &self,
-        input: GetRequest
+        input: GetRequest,
     ) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error> {
         // TODO: Replace this with actual handling of the request
         let mut buf = Vec::with_capacity(input.encoded_len());
@@ -158,7 +154,7 @@ impl Handle<GetRequest> for RisDbSvc {
 impl Handle<PutRequest> for RisDbSvc {
     async fn handle(
         &self,
-        input: PutRequest
+        input: PutRequest,
     ) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error> {
         // TODO: Replace this with actual handling of the request
         let mut buf = Vec::with_capacity(input.encoded_len());
@@ -171,7 +167,7 @@ impl Handle<PutRequest> for RisDbSvc {
 trait Respond {
     async fn respond<T>(
         &self,
-        req: Request<Incoming>
+        req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
     where
         T: prost::Message + Default,
@@ -181,17 +177,17 @@ trait Respond {
 impl Respond for RisDbSvc {
     async fn respond<T>(
         &self,
-        req: Request<Incoming>
+        req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>
     where
         T: prost::Message + Default,
-        Self: Handle<T>
+        Self: Handle<T>,
     {
         let bytes = match accept_body(req).await {
             // Early return if the body sent is too large
             Err(AcceptBodyError::BodyTooLarge) => return Ok(payload_too_large()),
             Err(AcceptBodyError::FailedToConsume(err)) => Err(err),
-            Ok(bytes) => Ok(bytes)
+            Ok(bytes) => Ok(bytes),
         }?;
 
         let request = match T::decode(bytes) {
@@ -236,9 +232,10 @@ fn payload_too_large() -> Response<BoxBody<Bytes, hyper::Error>> {
 }
 
 fn failed_to_decode(err: DecodeError) -> Response<BoxBody<Bytes, hyper::Error>> {
-    let mut resp = Response::new(
-        full(format!("Failed to decode the provided input: {:?}", err))
-    );
+    let mut resp = Response::new(full(format!(
+        "Failed to decode the provided input: {:?}",
+        err
+    )));
     *resp.status_mut() = StatusCode::BAD_REQUEST;
     resp
 }

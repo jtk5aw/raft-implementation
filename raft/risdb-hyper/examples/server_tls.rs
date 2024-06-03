@@ -1,8 +1,8 @@
+use raft_grpc::database::{RisDb, RisDbImpl};
 use risdb_hyper::{get_workspace_base_dir, run};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use tracing::Level;
-use raft_grpc::database::{RisDb, RisDbImpl};
 
 fn setup_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // construct a subscriber that prints formatted traces to stdout
@@ -18,7 +18,6 @@ fn setup_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::subscriber::set_global_default(subscriber)?;
     Ok(())
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
