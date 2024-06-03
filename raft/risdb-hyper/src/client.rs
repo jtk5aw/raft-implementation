@@ -227,13 +227,13 @@ impl Endpoints {
         let get_uri = Uri::builder()
             .scheme(parsed_uri.scheme.clone())
             .authority(parsed_uri.authority.clone())
-            .path_and_query("/echo")
+            .path_and_query("/get")
             .build()?;
 
         let put_uri = Uri::builder()
             .scheme(parsed_uri.scheme.clone())
             .authority(parsed_uri.authority.clone())
-            .path_and_query("/echo")
+            .path_and_query("/put")
             .build()?;
 
         Ok(Endpoints {
@@ -315,7 +315,7 @@ impl Put for RisDbClient {
         }
         let bytes = Bytes::from(buf);
 
-        // TODO TODO TODO: Make the server send a GEtResposne and decode that
+        // TODO TODO TODO: Make the server send a PutResponse and decode that
         let response = PutRequest::decode(bytes)?;
 
         Ok(response)
