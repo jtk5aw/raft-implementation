@@ -1,6 +1,6 @@
 use crate::raft::state::{RaftNodeType, RaftStableData, RaftVolatileData};
-use crate::raft_grpc::raft_internal_client::RaftInternalClient;
-use crate::raft_grpc::{AppendEntriesInput, LogEntry, PingInput, RequestVoteInput};
+use crate::structs::raft_internal_client::RaftInternalClient;
+use crate::structs::{AppendEntriesInput, LogEntry, PingInput, RequestVoteInput};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::DerefMut;

@@ -26,8 +26,6 @@ message ProposeValueInput {
 }
 
 message ProposeValueOutput {
-  // Returns success of the request
-  bool successful = 1;
   // Request ID propagated through from RisDb
   string request_id = 2;
 }

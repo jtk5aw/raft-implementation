@@ -1,5 +1,8 @@
 use super::helper::error;
-use crate::structs::{GetRequest, PutRequest};
+use crate::structs::{
+    get_response, put_response, GetFailure, GetRequest, GetResponse, GetSuccess, PutFailure,
+    PutRequest, PutResponse, PutSuccess,
+};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Bytes, Incoming};
@@ -9,6 +12,10 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use prost::{DecodeError, Message};
 use raft_grpc::database::RisDb;
+use raft_grpc::structs::{
+    GetValueInput, GetValueOutput, ProposeValueInput, ProposeValueOutput, RaftMessage,
+};
+use raft_grpc::{shared, ReadAndWrite};
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::future::Future;
@@ -132,21 +139,72 @@ trait Handle<T> {
     async fn handle(&self, input: T) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error>;
 }
 
-// TODO: Figure out what to do with these. I feel like the regular response
-// just needs to encode the error in it somehow i feel like that's the best way to make this work.
-enum GetError {}
+/// Needed to convert this crates Value implementation to the Raft
+/// crates value implementation
+/// TODO: Make it so this isn't necessary either via a shared protobuf definition
+///  or by making the API take something that's protobuf agnostic
+impl From<crate::structs::Value> for shared::Value {
+    fn from(this_crate_value: crate::structs::Value) -> Self {
+        Self {
+            key: this_crate_value.key,
+            value: this_crate_value.value,
+        }
+    }
+}
 
-enum PutError {}
+/// Needed to convert the Raft crates Value implementation to this crates
+/// Value implementation.
+/// TODO: Make it so this isn't necessary either via a shared protobuf definition
+///  or by making the API take something that's protobuf agnostic
+impl From<shared::Value> for crate::structs::Value {
+    fn from(raft_crate_value: shared::Value) -> Self {
+        Self {
+            key: raft_crate_value.key,
+            value: raft_crate_value.value,
+        }
+    }
+}
 
 impl Handle<GetRequest> for RisDbSvc {
     async fn handle(
         &self,
         input: GetRequest,
     ) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error> {
-        // TODO: Replace this with actual handling of the request
-        let mut buf = Vec::with_capacity(input.encoded_len());
+        let get_value_output = self
+            .risdb
+            .database
+            .get_value(GetValueInput {
+                request_id: input.request_id.to_owned(),
+                keys: input
+                    .keys
+                    .into_iter()
+                    .map(|this_crate_value| this_crate_value.into())
+                    .collect(),
+            })
+            .await;
+
+        let response = match get_value_output {
+            Ok(output) => GetResponse {
+                request_id: input.request_id,
+                response: Some(get_response::Response::Success(GetSuccess {
+                    values: output
+                        .values
+                        .into_iter()
+                        .map(|raft_crate_value| raft_crate_value.into())
+                        .collect(),
+                })),
+            },
+            Err(read_error) => GetResponse {
+                request_id: input.request_id,
+                response: Some(get_response::Response::Failure(GetFailure {
+                    reason: format!("Failed to get: {:?}", read_error),
+                })),
+            },
+        };
+
+        let mut buf = Vec::with_capacity(response.encoded_len());
         // Unwrap is safe, since we have reserved sufficient capacity in the vector.
-        input.encode(&mut buf).unwrap();
+        response.encode(&mut buf).unwrap();
         Ok(full(Bytes::from(buf)))
     }
 }
@@ -156,10 +214,35 @@ impl Handle<PutRequest> for RisDbSvc {
         &self,
         input: PutRequest,
     ) -> Result<BoxBody<Bytes, hyper::Error>, hyper::Error> {
-        // TODO: Replace this with actual handling of the request
-        let mut buf = Vec::with_capacity(input.encoded_len());
+        let propose_value_output = self
+            .risdb
+            .database
+            .propose_value(ProposeValueInput {
+                request_id: input.request_id.to_owned(),
+                values: input
+                    .values
+                    .into_iter()
+                    .map(|this_crate_value| this_crate_value.into())
+                    .collect(),
+            })
+            .await;
+
+        let response = match propose_value_output {
+            Ok(_output) => PutResponse {
+                request_id: input.request_id,
+                response: Some(put_response::Response::Success(PutSuccess {})),
+            },
+            Err(write_error) => PutResponse {
+                request_id: input.request_id.to_owned(),
+                response: Some(put_response::Response::Failure(PutFailure {
+                    reason: format!("Failed to put: {:?}", write_error),
+                })),
+            },
+        };
+
+        let mut buf = Vec::with_capacity(response.encoded_len());
         // Unwrap is safe, since we have reserved sufficient capacity in the vector.
-        input.encode(&mut buf).unwrap();
+        response.encode(&mut buf).unwrap();
         Ok(full(Bytes::from(buf)))
     }
 }

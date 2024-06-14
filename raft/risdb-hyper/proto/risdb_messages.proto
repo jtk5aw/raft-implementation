@@ -11,8 +11,18 @@ message PutRequest {
 message PutResponse {
   // request id
   string request_id = 1;
-  // boolean representing success or failure
-  bool success = 2;
+  oneof response {
+    PutSuccess success = 2;
+    PutFailure failure = 3;
+  }
+}
+
+message PutSuccess {
+}
+
+message PutFailure {
+  // Reason for failure
+  string reason = 1;
 }
 
 message GetRequest {
@@ -25,10 +35,20 @@ message GetRequest {
 message GetResponse {
   // request id
   string request_id = 1;
-  // boolean representing success or failure
-  bool success = 2;
-  /// Values being returned
+  oneof response {
+    GetSuccess success = 2;
+    GetFailure failure = 3;
+  }
+}
+
+message GetSuccess {
+  // Values being returned
   repeated Value values = 3;
+}
+
+message GetFailure {
+  // Reason for failure
+  string reason = 1;
 }
 
 message Value {

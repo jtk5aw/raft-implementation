@@ -4,9 +4,9 @@ use crate::raft::peer::{Candidate, Leader, PeerConnections, PeerSetup, StateMach
 use crate::raft::state::{
     RaftNodeType, RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState,
 };
-use crate::raft_grpc::log_entry::LogAction;
-use crate::raft_grpc::raft_internal_server::RaftInternal;
-use crate::raft_grpc::{
+use crate::structs::log_entry::LogAction;
+use crate::structs::raft_internal_server::RaftInternal;
+use crate::structs::{
     AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput,
     PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput,
 };
@@ -92,7 +92,7 @@ pub trait ReadAndWrite {
     /// Ok(GetValueOutput): `Value`s corresponding to the provided keys if they exist
     /// Err(ReadError): `ReadError` representing the issue encountered while trying to
     ///                  retrieve the provided keys.
-    async fn get_value(&self, get_value_input: &GetValueInput)
+    async fn get_value(&self, get_value_input: GetValueInput)
         -> Result<GetValueOutput, ReadError>;
 
     async fn propose_value(
@@ -363,7 +363,6 @@ impl RaftInternal for RaftImpl {
 
         let reply = ProposeValueOutput {
             request_id,
-            successful: true,
         };
 
         Ok(Response::new(reply))
@@ -379,9 +378,11 @@ impl RaftInternal for RaftImpl {
         let get_value_input = request.into_inner();
         tracing::Span::current().record("request_id", &get_value_input.request_id);
 
+        let copied_request_id = get_value_input.request_id.to_owned();
+
         let output = self
             .inner
-            .get_value(&get_value_input)
+            .get_value(get_value_input)
             .await
             .map_err(|err| {
                 Status::internal(format!(
@@ -391,7 +392,7 @@ impl RaftInternal for RaftImpl {
             })?;
 
         let reply = GetValueOutput {
-            request_id: get_value_input.request_id,
+            request_id: copied_request_id,
             values: output.values,
         };
 
@@ -643,7 +644,7 @@ impl ReadAndWrite for Database {
     #[tracing::instrument(skip_all, ret, err(Debug))]
     async fn get_value(
         &self,
-        get_value_input: &GetValueInput,
+        get_value_input: GetValueInput,
     ) -> Result<GetValueOutput, ReadError> {
         let data = self.data_store.data.lock().await;
 
@@ -739,7 +740,6 @@ impl ReadAndWrite for Database {
 
         Ok(ProposeValueOutput {
             request_id,
-            successful: true,
         })
     }
 }

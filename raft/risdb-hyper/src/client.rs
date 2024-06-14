@@ -1,5 +1,5 @@
 use crate::helper::error;
-use crate::structs::{GetRequest, PutRequest};
+use crate::structs::{GetRequest, GetResponse, PutRequest, PutResponse, PutSuccess};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::http::uri::{Authority, Scheme};
@@ -110,14 +110,15 @@ where
 }
 
 pub trait Get: CreateRequest<GetRequest> {
-    fn get(&self, keys: GetRequest) -> impl Future<Output = Result<GetRequest, RisDbError>> + Send;
+    fn get(&self, keys: GetRequest)
+        -> impl Future<Output = Result<GetResponse, RisDbError>> + Send;
 }
 
 pub trait Put: CreateRequest<PutRequest> {
     fn put(
         &self,
         values: PutRequest,
-    ) -> impl Future<Output = Result<PutRequest, RisDbError>> + Send;
+    ) -> impl Future<Output = Result<PutResponse, RisDbError>> + Send;
 }
 
 // Impls
@@ -265,7 +266,7 @@ impl CreateRequest<PutRequest> for RisDbClient {
 }
 
 impl Get for RisDbClient {
-    async fn get(&self, keys: GetRequest) -> Result<GetRequest, RisDbError> {
+    async fn get(&self, keys: GetRequest) -> Result<GetResponse, RisDbError> {
         let req = self.create_request(keys)?;
 
         let mut result = self
@@ -285,14 +286,14 @@ impl Get for RisDbClient {
         let bytes = Bytes::from(buf);
 
         // TODO TODO TODO: Make the server send a GEtResposne and decode that
-        let response = GetRequest::decode(bytes)?;
+        let response = GetResponse::decode(bytes)?;
 
         Ok(response)
     }
 }
 
 impl Put for RisDbClient {
-    async fn put(&self, values: PutRequest) -> Result<PutRequest, RisDbError> {
+    async fn put(&self, values: PutRequest) -> Result<PutResponse, RisDbError> {
         let req = self.create_request(values)?;
 
         let mut result = self
@@ -312,7 +313,7 @@ impl Put for RisDbClient {
         let bytes = Bytes::from(buf);
 
         // TODO TODO TODO: Make the server send a PutResponse and decode that
-        let response = PutRequest::decode(bytes)?;
+        let response = PutResponse::decode(bytes)?;
 
         Ok(response)
     }

@@ -1,4 +1,4 @@
-use crate::raft_grpc::LogEntry;
+use crate::structs::LogEntry;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

@@ -1,7 +1,7 @@
 use crate::raft::peer::StateMachineError;
 use crate::raft::state::{RaftStableData, RaftVolatileData};
-use crate::raft_grpc::log_entry::LogAction;
-use crate::raft_grpc::LogEntry;
+use crate::structs::log_entry::LogAction;
+use crate::structs::LogEntry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

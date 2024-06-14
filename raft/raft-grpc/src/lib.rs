@@ -4,9 +4,12 @@
 
 pub mod database;
 mod raft;
+pub use self::raft::node::Database;
+pub use self::raft::node::ReadAndWrite;
 
-pub mod raft_grpc {
+pub mod structs {
     tonic::include_proto!("raftgrpc");
+    pub use prost::Message as RaftMessage;
 }
 
 pub mod shared {

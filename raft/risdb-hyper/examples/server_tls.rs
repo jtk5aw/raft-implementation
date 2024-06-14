@@ -1,4 +1,4 @@
-use raft_grpc::database::{RisDb, RisDbImpl};
+use raft_grpc::database::{RisDb, RisDbImpl, ServerArgs};
 use risdb_hyper::{get_workspace_base_dir, run};
 use std::net::SocketAddr;
 use std::str::FromStr;

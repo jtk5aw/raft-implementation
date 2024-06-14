@@ -6,7 +6,7 @@ use tokio::{task::JoinHandle, try_join};
 use tonic::transport::Server;
 
 use crate::raft::node::{Database, HeartbeatError, RaftImpl, SetupError};
-use crate::raft_grpc::raft_internal_server::RaftInternalServer;
+use crate::structs::raft_internal_server::RaftInternalServer;
 
 #[derive(Debug)]
 pub struct ServerArgs {
