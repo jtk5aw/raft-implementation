@@ -10,12 +10,11 @@ use crate::structs::raft_internal_server::RaftInternalServer;
 
 #[derive(Debug)]
 pub struct ServerArgs {
-    pub risdb_addr: SocketAddr,
     pub raft_addr: SocketAddr,
     pub peer_args: Vec<PeerArgs>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PeerArgs {
     pub addr: String,
 }

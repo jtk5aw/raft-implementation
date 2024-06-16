@@ -29,16 +29,20 @@ use tokio_rustls::TlsAcceptor;
 use tower::ServiceBuilder;
 use tracing::info;
 
+pub struct RisDbArgs {
+    pub addr: String,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
 pub async fn run(
-    addr: SocketAddr,
-    certs_path: &PathBuf,
-    key_path: &PathBuf,
+    args: RisDbArgs,
     database: RisDb,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let certs = load_certs(certs_path)?;
-    let key = load_private_key(key_path)?;
+    let certs = load_certs(&args.cert_path)?;
+    let key = load_private_key(&args.key_path)?;
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(args.addr).await?;
 
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()

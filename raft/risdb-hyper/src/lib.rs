@@ -10,3 +10,4 @@ pub mod structs {
 pub use self::client::*;
 pub use self::helper::get_workspace_base_dir;
 pub use self::server::run;
+pub use self::server::RisDbArgs;

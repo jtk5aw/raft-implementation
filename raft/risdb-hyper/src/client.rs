@@ -1,22 +1,22 @@
 use crate::helper::error;
-use crate::structs::{GetRequest, GetResponse, PutRequest, PutResponse, PutSuccess};
+use crate::structs::{GetRequest, GetResponse, PutRequest, PutResponse, Value};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
+use hyper::http::request::Builder;
 use hyper::http::uri::{Authority, Scheme};
 use hyper::{http, Request, Uri};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use prost::{DecodeError, Message};
+use prost::DecodeError;
 use rustls::{ClientConfig, RootCertStore};
-use std::future::Future;
 use std::io::Error;
 use std::path::PathBuf;
 use std::{fs, io};
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
+use uuid::Uuid;
 
-// Errors
 #[derive(Debug)]
 pub enum ClientBuilderError {
     MissingRootCertPath,
@@ -93,35 +93,6 @@ pub struct ClientBuilder {
     base_uri: Option<Uri>,
 }
 
-// Traits
-/// TODO: Update this to do response too once that's implemented cause there will be duplicate code there.
-pub trait CreateRequest<T>
-where
-    T: prost::Message,
-{
-    fn create_request(&self, input: T) -> Result<Request<Full<Bytes>>, http::Error>;
-
-    fn write_to_buffer(input: T) -> Bytes {
-        let mut buf = Vec::with_capacity(input.encoded_len());
-        // Unwrap is safe, since we have reserved sufficient capacity in the vector.
-        input.encode(&mut buf).unwrap();
-        Bytes::from(buf)
-    }
-}
-
-pub trait Get: CreateRequest<GetRequest> {
-    fn get(&self, keys: GetRequest)
-        -> impl Future<Output = Result<GetResponse, RisDbError>> + Send;
-}
-
-pub trait Put: CreateRequest<PutRequest> {
-    fn put(
-        &self,
-        values: PutRequest,
-    ) -> impl Future<Output = Result<PutResponse, RisDbError>> + Send;
-}
-
-// Impls
 impl ClientBuilder {
     pub fn new() -> Self {
         Self {
@@ -241,80 +212,76 @@ impl Endpoints {
     }
 }
 
-// Note to future self: I went ahead and left these CreateRequestfs with some duplicate code as I could very easily
+impl RisDbClient {
+    async fn send_request<M, O>(&self, input: M) -> Result<O, RisDbError>
+    where
+        M: prost::Message,
+        O: prost::Message + Default,
+        Self: CreateRequest<M>,
+    {
+        let mut buf = Vec::with_capacity(input.encoded_len());
+        // Unwrap is safe, since we have reserved sufficient capacity in the vector.
+        input.encode(&mut buf).unwrap();
+        let bytes = Bytes::from(buf);
+
+        let mut result = self
+            .client
+            .request(self.create_hyper_request().body(Full::from(bytes))?)
+            .await
+            .map_err(|e| error(format!("Could not get: {:?}", e)))?;
+
+        let mut buf: Vec<u8> = Vec::with_capacity(20);
+        while let Some(next) = result.frame().await {
+            let frame = next?;
+            if let Some(chunk) = frame.data_ref() {
+                // TODO: This might be returned a confusing error fix if neccessary
+                buf.write_all(chunk).await?;
+            }
+        }
+        let bytes = Bytes::from(buf);
+
+        let response = O::decode(bytes)?;
+
+        Ok(response)
+    }
+}
+
+trait CreateRequest<M> {
+    fn create_hyper_request(&self) -> Builder;
+}
+
+// Note to future self: I went ahead and left these CreateRequests with some duplicate code as I could very easily
 // see how these requests are generated diverging in headers added. Decision that could definitely
 // be revisited later.
 
-impl CreateRequest<GetRequest> for RisDbClient {
-    fn create_request(&self, input: GetRequest) -> Result<Request<Full<Bytes>>, http::Error> {
-        let bytes = Self::write_to_buffer(input);
-
-        Request::post(self.endpoints.get_uri.clone())
-            .header(hyper::header::HOST, self.endpoints.authority.as_str())
-            .body(Full::from(bytes))
-    }
-}
-
 impl CreateRequest<PutRequest> for RisDbClient {
-    fn create_request(&self, input: PutRequest) -> Result<Request<Full<Bytes>>, http::Error> {
-        let bytes = Self::write_to_buffer(input);
-
+    fn create_hyper_request(&self) -> Builder {
         Request::post(self.endpoints.put_uri.clone())
             .header(hyper::header::HOST, self.endpoints.authority.as_str())
-            .body(Full::from(bytes))
     }
 }
 
-impl Get for RisDbClient {
-    async fn get(&self, keys: GetRequest) -> Result<GetResponse, RisDbError> {
-        let req = self.create_request(keys)?;
-
-        let mut result = self
-            .client
-            .request(req)
-            .await
-            .map_err(|e| error(format!("Could not get: {:?}", e)))?;
-
-        let mut buf: Vec<u8> = Vec::with_capacity(20);
-        while let Some(next) = result.frame().await {
-            let frame = next?;
-            if let Some(chunk) = frame.data_ref() {
-                // TODO: This might be returned a confusing error fix if neccessary
-                buf.write_all(chunk).await?;
-            }
-        }
-        let bytes = Bytes::from(buf);
-
-        // TODO TODO TODO: Make the server send a GEtResposne and decode that
-        let response = GetResponse::decode(bytes)?;
-
-        Ok(response)
+impl CreateRequest<GetRequest> for RisDbClient {
+    fn create_hyper_request(&self) -> Builder {
+        Request::post(self.endpoints.get_uri.clone())
+            .header(hyper::header::HOST, self.endpoints.authority.as_str())
     }
 }
 
-impl Put for RisDbClient {
-    async fn put(&self, values: PutRequest) -> Result<PutResponse, RisDbError> {
-        let req = self.create_request(values)?;
+impl RisDbClient {
+    pub async fn get(&self, keys: Vec<String>) -> Result<GetResponse, RisDbError> {
+        self.send_request::<GetRequest, GetResponse>(GetRequest {
+            request_id: Uuid::new_v4().to_string(),
+            keys,
+        })
+        .await
+    }
 
-        let mut result = self
-            .client
-            .request(req)
-            .await
-            .map_err(|e| error(format!("Could not get: {:?}", e)))?;
-
-        let mut buf: Vec<u8> = Vec::with_capacity(20);
-        while let Some(next) = result.frame().await {
-            let frame = next?;
-            if let Some(chunk) = frame.data_ref() {
-                // TODO: This might be returned a confusing error fix if neccessary
-                buf.write_all(chunk).await?;
-            }
-        }
-        let bytes = Bytes::from(buf);
-
-        // TODO TODO TODO: Make the server send a PutResponse and decode that
-        let response = PutResponse::decode(bytes)?;
-
-        Ok(response)
+    pub async fn put(&self, values: Vec<Value>) -> Result<PutResponse, RisDbError> {
+        self.send_request::<PutRequest, PutResponse>(PutRequest {
+            request_id: Uuid::new_v4().to_string(),
+            values,
+        })
+        .await
     }
 }

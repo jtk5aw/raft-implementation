@@ -1,5 +1,5 @@
 use raft_grpc::database::{RisDb, RisDbImpl, ServerArgs};
-use risdb_hyper::{get_workspace_base_dir, run};
+use risdb_hyper::{get_workspace_base_dir, run, RisDbArgs};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use tracing::Level;
@@ -27,13 +27,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr_2 = SocketAddr::from_str("[::1]:3001").expect("Provided addr should be parseable");
 
     let base_dir = get_workspace_base_dir();
-    let cert_path = &base_dir.join("certs").join("risdb.pem");
-    let key_path = &base_dir.join("certs").join("risdb.ec");
+    let cert_path = base_dir.join("certs").join("risdb.pem");
+    let key_path = base_dir.join("certs").join("risdb.ec");
 
     // Create dummy database that doesn't actually do anything without calling startup
     let risdb = RisDb::new(addr_2);
 
-    run(addr_1, cert_path, key_path, risdb).await?;
+    let risdb_args = RisDbArgs {
+        addr: addr_1.to_string(),
+        cert_path,
+        key_path,
+    };
+    run(risdb_args, risdb).await?;
 
     Ok(())
 }

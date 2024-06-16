@@ -1,5 +1,5 @@
 use risdb_hyper::structs::{GetRequest, PutRequest, Value};
-use risdb_hyper::{get_workspace_base_dir, ClientBuilder, Get, Put};
+use risdb_hyper::{get_workspace_base_dir, ClientBuilder};
 use tracing::Level;
 
 fn setup_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -37,23 +37,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap();
 
     let put_result = client
-        .put(PutRequest {
-            request_id: "0-0-0-0".to_string(),
-            values: vec![Value {
-                key: "key".to_string(),
-                value: "value".to_string(),
-            }],
-        })
+        .put(vec![Value {
+            key: "key".to_string(),
+            value: "value".to_string(),
+        }])
         .await;
 
     println!("{:?}", put_result);
 
-    let get_result = client
-        .get(GetRequest {
-            request_id: "1-1-1-1".to_string(),
-            keys: vec!["key1".to_string()],
-        })
-        .await;
+    let get_result = client.get(vec!["key1".to_string()]).await;
 
     println!("{:?}", get_result);
 
