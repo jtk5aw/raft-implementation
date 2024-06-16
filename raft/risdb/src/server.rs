@@ -77,12 +77,10 @@ fn generate_args<'a>(arg: String) -> Result<Args, Box<dyn std::error::Error>> {
     let cert_path = base_dir.join("certs").join("risdb.pem");
     let key_path = base_dir.join("certs").join("risdb.ec");
 
-
     let peer_args = pairs
         .map(|peer_arg_str| {
-            let split_peer_arg = peer_arg_str.split_once(',').unwrap();
             PeerArgs {
-                addr: split_peer_arg.0.to_string(),
+                addr: peer_arg_str.to_string(),
             }
         })
         .collect();
