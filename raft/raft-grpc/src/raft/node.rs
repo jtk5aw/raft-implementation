@@ -4,13 +4,13 @@ use crate::raft::peer::{Candidate, Leader, PeerConnections, PeerSetup, StateMach
 use crate::raft::state::{
     RaftNodeType, RaftStableData, RaftStableState, RaftVolatileData, RaftVolatileState,
 };
+use crate::shared::Value;
 use crate::structs::log_entry::LogAction;
 use crate::structs::raft_internal_server::RaftInternal;
 use crate::structs::{
     AppendEntriesInput, AppendEntriesOutput, GetValueInput, GetValueOutput, LogEntry, PingInput,
     PingOutput, ProposeValueInput, ProposeValueOutput, RequestVoteInput, RequestVoteOutput,
 };
-use crate::shared::Value;
 use rand::Rng;
 use std::cmp::{min, Ordering};
 use std::collections::HashMap;
@@ -92,9 +92,18 @@ pub trait ReadAndWrite {
     /// Ok(GetValueOutput): `Value`s corresponding to the provided keys if they exist
     /// Err(ReadError): `ReadError` representing the issue encountered while trying to
     ///                  retrieve the provided keys.
-    async fn get_value(&self, get_value_input: GetValueInput)
-        -> Result<GetValueOutput, ReadError>;
+    async fn get_value(&self, get_value_input: GetValueInput) -> Result<GetValueOutput, ReadError>;
 
+    /// Takes a provided `ProposeValueInput` and attempts to append the provided
+    /// `Value`s to the nodes Log while also sharing with a majority of peers. Assuming
+    /// a majority of peers receive and acknowledge apply the value as well, a success will
+    /// be returned and the value will be inserted into the data store.
+    ///
+    /// Returns:
+    /// Ok(ProposeValueOutput): `Value`s are properly inserted to the database after sharing with peers
+    /// Err(WriteError): `Value`s were not properly inserted.
+    ///
+    /// propse_value_input: Contains the set of `Value`s to insert.
     async fn propose_value(
         &self,
         propose_value_input: ProposeValueInput,
@@ -361,9 +370,7 @@ impl RaftInternal for RaftImpl {
                 Status::internal(format!("Failed to write the new values due to: {:?}", err))
             })?;
 
-        let reply = ProposeValueOutput {
-            request_id,
-        };
+        let reply = ProposeValueOutput { request_id };
 
         Ok(Response::new(reply))
     }
@@ -380,16 +387,12 @@ impl RaftInternal for RaftImpl {
 
         let copied_request_id = get_value_input.request_id.to_owned();
 
-        let output = self
-            .inner
-            .get_value(get_value_input)
-            .await
-            .map_err(|err| {
-                Status::internal(format!(
-                    "Failed to get value from the state machine: {:?}",
-                    err
-                ))
-            })?;
+        let output = self.inner.get_value(get_value_input).await.map_err(|err| {
+            Status::internal(format!(
+                "Failed to get value from the state machine: {:?}",
+                err
+            ))
+        })?;
 
         let reply = GetValueOutput {
             request_id: copied_request_id,
@@ -642,10 +645,7 @@ impl Follower for Database {
 #[tonic::async_trait]
 impl ReadAndWrite for Database {
     #[tracing::instrument(skip_all, ret, err(Debug))]
-    async fn get_value(
-        &self,
-        get_value_input: GetValueInput,
-    ) -> Result<GetValueOutput, ReadError> {
+    async fn get_value(&self, get_value_input: GetValueInput) -> Result<GetValueOutput, ReadError> {
         let data = self.data_store.data.lock().await;
 
         let values = get_value_input
@@ -738,9 +738,7 @@ impl ReadAndWrite for Database {
 
         tracing::debug!("Returning result to client");
 
-        Ok(ProposeValueOutput {
-            request_id,
-        })
+        Ok(ProposeValueOutput { request_id })
     }
 }
 

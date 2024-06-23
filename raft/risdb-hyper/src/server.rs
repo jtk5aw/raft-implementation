@@ -12,14 +12,11 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use prost::{DecodeError, Message};
 use raft_grpc::database::RisDb;
-use raft_grpc::structs::{
-    GetValueInput, GetValueOutput, ProposeValueInput, ProposeValueOutput, RaftMessage,
-};
+use raft_grpc::structs::{GetValueInput, ProposeValueInput};
 use raft_grpc::{shared, ReadAndWrite};
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;

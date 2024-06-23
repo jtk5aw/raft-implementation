@@ -1,6 +1,6 @@
-use std::env;
-use risdb_hyper::structs::{GetRequest, PutRequest, Value};
+use risdb_hyper::structs::Value;
 use risdb_hyper::{get_workspace_base_dir, ClientBuilder, RisDbClient};
+use std::env;
 use tracing::{info, Level};
 
 fn setup_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let result = match action {
         "GET" => make_get_call(client, args.get(3).unwrap().as_ref()).await,
         "PUT" => make_put_call(client, args.get(3).unwrap().as_ref()).await,
-        _ => panic!("either input GET or PUT")
+        _ => panic!("either input GET or PUT"),
     };
 
     info!("The returned result is: {:?}", result);
@@ -56,25 +56,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 async fn make_get_call(client: RisDbClient, input: &str) -> String {
     let keys: Vec<String> = input.split(',').map(|str| str.to_owned()).collect();
 
-    let get_result = client
-        .get(keys)
-        .await;
+    let get_result = client.get(keys).await;
 
     format!("Returned result is: {:?}", get_result)
 }
 
 async fn make_put_call(client: RisDbClient, input: &str) -> String {
-    let values = input.split(',')
+    let values = input
+        .split(',')
         .map(|str| str.split_once(';').unwrap())
         .map(|pair| Value {
             key: pair.0.to_string(),
-            value: pair.1.to_string()
+            value: pair.1.to_string(),
         })
         .collect();
 
-    let put_result = client
-        .put(values)
-        .await;
+    let put_result = client.put(values).await;
 
     format!("Returned result is: {:?}", put_result)
 }

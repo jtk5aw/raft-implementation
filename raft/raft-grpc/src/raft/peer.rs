@@ -313,7 +313,6 @@ impl Leader for PeerConnections {
             stable_data.log.push(log_entry.to_owned());
         });
 
-        // TODO: Continue retrying to reach peers that failed and also handle decrementing log entry and retrying for log inconsistencies
         tracing::info!("Proposing new value to peers");
 
         let propose_to_peers_result = self
@@ -338,7 +337,7 @@ impl Leader for PeerConnections {
                     _ => -10, // This should never happen so it is made an arbitrarily small number
                 })
                 .max()
-                .unwrap_or_else(|| stable_data.current_term);
+                .unwrap_or(stable_data.current_term);
             stable_data.node_type = RaftNodeType::Follower(false);
             tracing::info!(stable_data.current_term, "The term after conversion");
             return Ok(());
