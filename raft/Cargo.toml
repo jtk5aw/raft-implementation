@@ -2,7 +2,8 @@
 
 members = [
     "raft-grpc",
-    "risdb",
+    "risdb", 
+    "risdb-deploy",
     "risdb-hyper",
     "risdb-proxy"
 ]
