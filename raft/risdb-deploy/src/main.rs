@@ -1,8 +1,9 @@
 use superconsole::{Component, DrawMode, Line, Lines, SuperConsole, style::{Color, Stylize}};
-use core::time;
-use std::{io::{BufRead, BufReader}, process::Stdio, thread};
+use std::{collections::{BTreeMap, VecDeque}, io::{BufRead, BufReader as StdBufReader}, path::PathBuf, process::Stdio, time::Duration};
+use tokio::{io::{AsyncBufReadExt, BufReader}, process::{Child, ChildStdout}};
+use tokio::sync::mpsc;
 use clap::{Args, Parser, Subcommand};
-use risdb_deploy::local::{run_local_test, ServerArgs};
+use risdb_deploy::local::{start_local_test, ServerArgs};
 
 /// Test RisDb locally or deploy RisDb remotely
 #[derive(Parser)]
@@ -27,7 +28,7 @@ struct TestArgs {
     pattern: String,
     /// The path to the file to read
     #[arg(long)]
-    path: std::path::PathBuf,
+    path: PathBuf,
 }
 
 #[derive(Args)]
@@ -37,7 +38,7 @@ struct LocalArgs {
     num_servers: u8,
     /// Path to re-install the RisDb binary from. Only re-installs if this value is present 
     #[arg(long)]
-    reinstall_path: Option<std::path::PathBuf>,
+    reinstall_path: Option<PathBuf>,
 }
 
 enum Setup<'a> {
@@ -47,16 +48,22 @@ enum Setup<'a> {
     Done,
 }
 
-fn main() {
+enum InProgress<'a> {
+    NoLogs,
+    Logs(&'a BTreeMap<String, Box<VecDeque<String>>>),
+}
+
+#[tokio::main]
+async fn main() {
     let arguments = Cli::parse();
-    arguments.command.execute_command();
+    arguments.command.execute_command().await;
 }
 
 impl Commands {
-    fn execute_command(self) {
+    async fn execute_command(self) {
         match self {
             Commands::Test(test_args) => println!("pattern: {:?}, path: {:?}", test_args.pattern, test_args.path),
-            Commands::Local(local_args) => local_args.execute(),
+            Commands::Local(local_args) => local_args.execute().await,
         }
     }
 }
@@ -64,7 +71,7 @@ impl Commands {
 impl<'a> Setup<'a> {
     fn get_lines(&self) -> anyhow::Result<superconsole::Lines> {
         let line = match self {
-            Setup::Start =>Line::from_iter([
+            Setup::Start => Line::from_iter([
                 "Performing test setup".to_string().try_into()?
             ]),
             Setup::Reinstall(reinstall_path) => Line::from_iter([
@@ -104,11 +111,43 @@ impl<'a> Component for Setup<'a> {
     }
 }
 
+impl<'a> Component for InProgress<'a> {
+    fn draw_unchecked(
+        &self, 
+        _dimensions: superconsole::Dimensions, 
+        _mode: DrawMode
+    ) -> anyhow::Result<Lines> {
+        match self {
+            Self::NoLogs => {
+                let line = Line::from_iter([
+                    "This is a second test".to_string().try_into()?
+                ]);
+                Ok(Lines(vec![line]))
+            },
+            Self::Logs(log_tracker) => {
+                let mut lines: Vec<Line> = Vec::with_capacity(log_tracker.len() * (NUM_NODE_LOGS + 1));
+                for (id, logs) in log_tracker.iter() {
+                    let leading_line = Line::from_iter([
+                        format!("Logs for {}", id).with(Color::Cyan).try_into()?
+                    ]);
+                    lines.push(leading_line);
+
+                    let logs = *logs.clone();
+                    let mut log_lines = filter_bad_characters(logs);
+                    lines.append(&mut log_lines);
+                }
+                Ok(Lines(lines))
+            },
+        }
+    }
+}
+
 const FIRST_FRONTEND_PORT: u16 = 5000;
 const FIRST_RAFT_PORT: u16 = 50_000;
+const NUM_NODE_LOGS: usize = 10;
 
 impl LocalArgs { 
-    fn execute(self) { 
+    async fn execute(self) { 
         let num_servers = self.num_servers as u16;
 
         let mut console = SuperConsole::new().expect("Failed to intialize SuperConsole...");
@@ -127,63 +166,7 @@ impl LocalArgs {
 
         if let Some(reinstall_path) = self.reinstall_path {
             let reinstall_path_str = reinstall_path.to_str().expect("Provided path could not be parsed");
-                
-            let pre_build_messages = vec![
-                Line::from_iter([
-                    "Starting to re-install helloworld-server".to_string().with(Color::Magenta).try_into().unwrap()
-                ])
-            ];
-            console.emit(Lines(pre_build_messages));
-
-            console.render(&Setup::Reinstall(reinstall_path_str)).unwrap();
-            
-            let stdout = std::process::Command::new(env!("CARGO"))
-                .arg("install")
-                .arg("--bin=helloworld-server")
-                .arg(format!("--path={}", reinstall_path_str))
-                .arg("--color=always")
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("Failed to start install command...")
-                .stderr
-                .expect("Failed to get a handle on install stdout..");
-
-            let mut reader = BufReader::new(stdout);
-
-            let reinstall_successful = 'outer: loop {
-                let mut lines = Vec::with_capacity(10);
-                for _ in 1..=10 {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => break 'outer true,
-                        Err(_) => {
-                            println!("Failed to read install output. Failling...");
-                            break 'outer false;
-                        },
-                        _ => (),
-                    };
-                    lines.push(line
-                        .chars()
-                        .into_iter()
-                        // Superconsole doesn't allow non space whitespace so I just filter it out
-                        // for now
-                        .filter(|c| *c == ' ' || !c.is_whitespace())
-                        .collect()
-                    );
-                }
-
-                let messages = lines
-                    .into_iter()
-                    .map(|line: String|
-                        Line::from_iter([
-                            line.try_into().unwrap()
-                        ])
-                    )
-                    .collect();
-                console.emit(Lines(messages));
-
-                console.render(&Setup::Reinstall(reinstall_path_str)).unwrap();
-            };
+            let reinstall_successful = reinstall(&mut console, reinstall_path_str);
 
             if reinstall_successful {
                 console.render(&Setup::CompleteReinstall(reinstall_path_str)).unwrap();
@@ -193,8 +176,131 @@ impl LocalArgs {
             }
         }
 
-        run_local_test(server_args);
+        console.render(&InProgress::NoLogs).unwrap();
+
+        let (children, stdouts): (Vec<Child>, Vec<ChildStdout>) = 
+                start_local_test(server_args)
+                    .into_iter()
+                    .unzip();
+
+        let (sender, mut receiver) = mpsc::channel(32);
+
+        let mut log_tracker: BTreeMap<String, Box<VecDeque<String>>> = BTreeMap::new();
+        stdouts.into_iter().enumerate().for_each(|(i, stdout)| {
+            let sender_clone = sender.clone();
+            log_tracker.insert(i.to_string(), Box::new(VecDeque::with_capacity(10)));
+
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Err(err) => return Err(err),
+                        Ok(0) => return Ok(()),
+                        Ok(_) => { 
+                            let log_message = LogMessage {
+                                sender_id: i,
+                                message: line.to_owned()
+                            };
+                            let _ = sender_clone.send(log_message).await;
+                        },
+                    }
+                }
+            });
+        });
+
+        let start = std::time::SystemTime::now();
+        while let Some(log_message) = receiver.recv().await {
+            let sender_id = log_message.sender_id.to_string();
+            log_tracker.get_mut(&sender_id)
+                .map(|log_deque| {
+                    log_deque.push_back(log_message.message);
+                    if log_deque.len() > NUM_NODE_LOGS {
+                        log_deque.pop_front();
+                    }
+                });
+            console.render(&InProgress::Logs(&log_tracker)).unwrap();
+            if start.elapsed().unwrap() >= Duration::new(30, 0) { break; }
+        }
+
+        for mut child in children {
+            child.kill().await.expect("Failed to kill child");
+        }
 
         console.finalize(&Setup::Done).unwrap();
     }
 }
+
+fn reinstall(
+    console: &mut SuperConsole,
+    reinstall_path_str: &str,
+) -> bool {
+    let pre_build_messages = vec![
+        Line::from_iter([
+            "Starting to re-install helloworld-server".to_string().with(Color::Magenta).try_into().unwrap()
+        ])
+    ];
+    console.emit(Lines(pre_build_messages));
+
+    console.render(&Setup::Reinstall(reinstall_path_str)).unwrap();
+
+    let stderr = std::process::Command::new(env!("CARGO"))
+        .arg("install")
+        .arg("--bin=helloworld-server")
+        .arg(format!("--path={}", reinstall_path_str))
+        .arg("--color=always")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to start install command...")
+        .stderr
+        .expect("Failed to get a handle on install stderr..");
+
+    let mut reader = StdBufReader::new(stderr);
+
+    let reinstall_successful = 'outer: loop {
+        let mut lines = Vec::with_capacity(10);
+        for _ in 1..=10 {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break 'outer true,
+                Err(_) => {
+                    println!("Failed to read install output. Failling...");
+                    break 'outer false;
+                },
+                _ => (),
+            };
+
+            lines.push(line);
+        }
+
+        let messages = filter_bad_characters(lines);
+        console.emit(Lines(messages));
+
+        console.render(&Setup::Reinstall(reinstall_path_str)).unwrap();
+    };
+
+    reinstall_successful
+}
+
+struct LogMessage {
+    sender_id: usize,
+    message: String,
+}
+
+fn filter_bad_characters<I>(lines: I) -> Vec<Line>
+where 
+    I: IntoIterator<Item = String>
+{
+    lines
+        .into_iter()
+        .map(|str| str
+            .chars()
+            .into_iter()
+            .filter(|c| *c == ' ' || !c.is_whitespace())
+            .collect::<String>()
+        )
+        .map(|line| Line::from_iter([line.try_into().unwrap()]))
+        .collect()
+}
+
