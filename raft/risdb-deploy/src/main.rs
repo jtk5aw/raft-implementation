@@ -9,7 +9,7 @@ use std::{
 };
 use superconsole::{
     style::{Color, Stylize},
-    Component, DrawMode, Line, Lines, SuperConsole,
+    Component, Dimensions, DrawMode, Line, Lines, SuperConsole,
 };
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
@@ -18,6 +18,7 @@ use tokio::{
     process::{Child, ChildStdout},
 };
 use tokio_util::sync::CancellationToken;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Test RisDb locally or deploy RisDb remotely
 #[derive(Parser)]
@@ -137,12 +138,8 @@ impl<'a> Component for Setup<'a> {
     }
 }
 
-impl<'a> Component for InProgress<'a> {
-    fn draw_unchecked(
-        &self,
-        _dimensions: superconsole::Dimensions,
-        _mode: DrawMode,
-    ) -> anyhow::Result<Lines> {
+impl<'a> InProgress<'a> {
+    fn get_lines(&self, dimensions: Dimensions) -> anyhow::Result<superconsole::Lines> {
         match self {
             Self::NoLogs => {
                 let line = Line::from_iter(["This is a second test".to_string().try_into()?]);
@@ -152,14 +149,35 @@ impl<'a> Component for InProgress<'a> {
                 let mut lines: Vec<Line> =
                     Vec::with_capacity(log_tracker.len() * (NUM_NODE_LOGS + 1) + 1);
 
+                // TODO TODO TODO: Rather than emitting these all in  one component. Draw each
+                // individual set of logs as its own component. This will lead to less bouncing
+                // around and make the logs easier to read. The tough part will be that
+                // superconsole claims to support rendering  sub components but it really doesn't
+
                 for (id, logs) in log_tracker.iter() {
                     let leading_line = Line::from_iter([format!("Logs for {}", id)
                         .with(Color::Cyan)
                         .try_into()?]);
                     lines.push(leading_line);
 
+                    // TODO TODO TODO: Make it so graphemes are cut off as full words. Right now
+                    // words cross line boundaries which makes it tough
                     let logs = *logs.clone();
-                    let mut log_lines = filter_bad_characters(logs);
+                    let mut log_lines = logs
+                        .iter()
+                        .flat_map(|line| {
+                            let mut graphemes = line.as_str().graphemes(true);
+                            std::iter::from_fn(move || {
+                                let chunk: Vec<&str> =
+                                    graphemes.by_ref().take(dimensions.width).collect();
+                                if chunk.is_empty() {
+                                    return None;
+                                }
+                                Some(chunk.concat())
+                            })
+                        })
+                        .map(|line| Line::sanitized(&line))
+                        .collect();
                     lines.append(&mut log_lines);
                 }
 
@@ -169,6 +187,25 @@ impl<'a> Component for InProgress<'a> {
 
                 Ok(Lines(lines))
             }
+        }
+    }
+}
+
+impl<'a> Component for InProgress<'a> {
+    fn draw_unchecked(
+        &self,
+        dimensions: superconsole::Dimensions,
+        mode: DrawMode,
+    ) -> anyhow::Result<Lines> {
+        match mode {
+            DrawMode::Normal => {
+                let lines = self.get_lines(dimensions)?;
+                Ok(lines)
+            }
+            DrawMode::Final => {
+                let lines = self.get_lines(dimensions)?;
+                Ok(lines)
+            } //DrawMode::Final => Ok(Lines(vec![])),
         }
     }
 }
@@ -295,7 +332,12 @@ impl LocalArgs {
         // TODO TODO TODO: Write all logs to a file and on finalize write out the file name where
         // logs were written
 
-        console.finalize(&Setup::Done).unwrap();
+        // TODO TODO: Movethe finalize back to Setup::Done once done with testing
+
+        let elapsed = start.elapsed().unwrap_or_else(|_| Duration::new(0, 0));
+        console
+            .finalize(&InProgress::Logs(&elapsed, &log_tracker))
+            .unwrap();
     }
 }
 
@@ -342,8 +384,13 @@ fn reinstall(console: &mut SuperConsole, reinstall_path_str: &str) -> bool {
             lines.push(line);
         }
 
-        let messages = filter_bad_characters(lines);
-        console.emit(Lines(messages));
+        let lines = Lines(
+            lines
+                .into_iter()
+                .map(|line| Line::sanitized(&line))
+                .collect(),
+        );
+        console.emit(lines);
 
         console
             .render(&Setup::Reinstall(reinstall_path_str))
@@ -365,20 +412,4 @@ struct LogMessage {
 
 struct CloseMessage {
     sender_id: usize,
-}
-
-fn filter_bad_characters<I>(lines: I) -> Vec<Line>
-where
-    I: IntoIterator<Item = String>,
-{
-    lines
-        .into_iter()
-        .map(|str| {
-            str.chars()
-                .into_iter()
-                .filter(|c| *c == ' ' || !c.is_whitespace())
-                .collect::<String>()
-        })
-        .map(|line| Line::from_iter([line.try_into().unwrap()]))
-        .collect()
 }
