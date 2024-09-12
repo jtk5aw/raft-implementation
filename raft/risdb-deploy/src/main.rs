@@ -1,9 +1,6 @@
 use ansi_to_tui::IntoText;
 use clap::{Args, Parser, Subcommand};
-use color_eyre::{
-    eyre::{bail, Context},
-    install,
-};
+use color_eyre::eyre::{bail, Context, Report};
 use crossterm::{
     event::{self, poll, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -14,21 +11,15 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Style, Stylize as _},
-    text::{Line, Text},
+    text::{Line, Span},
     widgets::{
         block::{Position, Title},
-        Block, Borders, Clear, Paragraph, Widget,
+        Block, Borders, Paragraph, Widget,
     },
     Frame, Terminal,
 };
 use std::{
-    cmp::{max, min},
-    collections::{BTreeMap, VecDeque},
-    io::{stdout, Stdout},
-    path::PathBuf,
-    process::Stdio,
-    sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
+    collections::{BTreeMap, VecDeque}, error::Error, fmt::Display, io::{stdout, Stdout}, path::PathBuf, process::Stdio, sync::mpsc::{self, Receiver, Sender}, time::Duration
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::runtime::Runtime;
@@ -135,7 +126,15 @@ impl Commands {
                     None => sender.send(LocalAppMessage::StartServers)?,
                 };
 
-                let _ = local_app.run(&mut local_app_state, &mut terminal);
+                let run_result = local_app.run(&mut local_app_state, &mut terminal)
+                    .map_err(|report| {
+                        let root_cause = report.root_cause().downcast_ref::<NoBacktraceError>();
+                        match root_cause {
+                            Some(no_backtrace_error) => 
+                                Report::msg(no_backtrace_error.msg.to_owned()),
+                            None => report
+                        }
+                    });
                 if let Err(err) = restore() {
                     eprintln!(
                         "failed to restore terminal. Run `reset` or exit your terminal to recover: {}",
@@ -146,8 +145,7 @@ impl Commands {
                 //let _ = ctrl_c().await;
                 //cancellation_token.cancel();
 
-                //let _ = program.await;
-                Ok(())
+                run_result
             }
         }
     }
@@ -204,6 +202,7 @@ enum LocalAppStateKind {
 }
 
 struct InstallState {
+    complete: bool,
     end_line: Option<usize>,
     lines: Vec<String>,
 }
@@ -211,6 +210,25 @@ struct InstallState {
 struct InProgressState {
     logs: BTreeMap<String, Box<RecentLogs>>,
 }
+
+#[derive(Debug)]
+struct NoBacktraceError {
+    msg: String,
+}
+
+impl NoBacktraceError {
+    fn msg(msg: String) -> Self {
+        Self { msg }
+    }
+}
+
+impl Display for NoBacktraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg.as_str())
+    }
+}
+
+impl Error for NoBacktraceError {}
 
 impl LocalAppState {
     fn start_exit(&mut self) {
@@ -257,11 +275,36 @@ impl LocalAppState {
         }
     }
 
+    fn try_continue(&mut self) {
+        match &mut self.kind {
+            LocalAppStateKind::Install(install_app_state) => {
+                if install_app_state.complete {
+                    self.sender.send(LocalAppMessage::StartServers).expect("request to start test servers failed");
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fn try_stop(&self) -> color_eyre::Result<()> {
+        match &self.kind {
+            LocalAppStateKind::Install(install_app_state) => {
+                if install_app_state.complete {
+                    return Err(Report::new(NoBacktraceError::msg("user requested to stop".to_string())));
+                }
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) -> color_eyre::Result<()> {
         match key_event.code {
             KeyCode::Char('q') => self.start_exit(),
             KeyCode::Char('k') => self.decrease_scroll(),
             KeyCode::Char('j') => self.increase_scroll(),
+            KeyCode::Char('y') => self.try_continue(),
+            KeyCode::Char('n') => self.try_stop()?,
             _ => {}
         }
         Ok(())
@@ -276,6 +319,7 @@ impl LocalAppState {
             LocalAppMessage::StartInstall(start_install_message) => match &mut self.kind {
                 LocalAppStateKind::Start => {
                     self.kind = LocalAppStateKind::Install(InstallState {
+                        complete: false,
                         lines: Vec::new(),
                         end_line: None,
                     });
@@ -283,9 +327,9 @@ impl LocalAppState {
                     let start_install_sender = self.sender.clone();
                     let start_install_token = self.cancellation_token.clone();
                     runtime.spawn(LocalAppState::reinstall(
-                        start_install_sender,
-                        start_install_token,
-                        start_install_message
+                            start_install_sender,
+                            start_install_token,
+                            start_install_message
                             .path
                             .to_str()
                             .expect("install path is not a valid string")
@@ -302,6 +346,14 @@ impl LocalAppState {
                     Ok(())
                 }
                 _ => bail!("install did not complete properly"),
+            },
+            LocalAppMessage::InstallComplete => match &mut self.kind {
+                LocalAppStateKind::Install(install_state) => {
+                    install_state.complete = true;
+                    Ok(())
+                }
+                _ => bail!("install did not complete properly"),
+
             },
             LocalAppMessage::ServerLog(_) => todo!("Can't handle server logs yet"),
         }
@@ -355,17 +407,14 @@ impl LocalAppState {
                 .expect("failed to update install progress");
         }
 
-        // TODO TODO TODO: When ready to start running servers uncomment this
-        // consider making it require a keypress to move on though or to start the test
-        // sender
-        //     .send(LocalAppMessage::StartServers)
-        //     .expect("failed to start test after install");
+        sender.send(LocalAppMessage::InstallComplete).expect("failed to send install complete");
     }
 }
 
 enum LocalAppMessage {
     StartInstall(StartInstallMessage),
     Install(InstallMessage),
+    InstallComplete,
     StartServers,
     ServerLog(ServerLogMessage),
 }
@@ -410,10 +459,12 @@ impl LocalApp {
                     self.render_logs_frame(frame, local_app_state.num_servers, &recent_logs)
                 }
                 _ => {}
-            })?;
+            })
+            .wrap_err("failed to draw")?;
+
             self.handle_events(local_app_state)
-                .wrap_err("handle events failed")?;
-        }
+                .wrap_err("failed to handle events")?;
+            }
         Ok(())
     }
 
@@ -440,7 +491,30 @@ impl LocalApp {
         let paragraph = Paragraph::new(lines_as_text);
 
         let area = frame.area();
-        frame.render_widget(paragraph, area);
+
+        if install_state.complete {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(vec![Constraint::Percentage(95), Constraint::Percentage(5)])
+                .split(frame.area());
+
+            frame.render_widget(paragraph, layout[0]);
+            
+            let continue_text = vec![
+                "\n".into(),
+                Line::from(vec![
+                    Span::styled("====== Continue? y/n ======", Style::new().green().italic()),
+                ]),
+                "\n".into(),
+            ];
+            let continue_paragraph = Paragraph::new(continue_text)
+                .style(Style::new().green().bold())
+                .left_aligned();
+
+            frame.render_widget(continue_paragraph, layout[1]);
+        } else {
+            frame.render_widget(paragraph, area);
+        }
     }
 
     fn render_logs_frame(&self, frame: &mut Frame, num_servers: u16, logs_state: &InProgressState) {

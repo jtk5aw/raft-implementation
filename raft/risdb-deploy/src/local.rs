@@ -15,7 +15,7 @@ pub fn start_local_test(server_args: Vec<ServerArgs>) -> Vec<(Child, ChildStdout
     server_args.iter().for_each(|server_arg| {
         let _ = format!(
             "frontend_port: {:?}, raft_port: {:?}",
-            server_arg.frontend_port, server_arg.raft_port
+           server_arg.frontend_port, server_arg.raft_port
         );
     });
 
