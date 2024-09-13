@@ -10,11 +10,10 @@ use ratatui::{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Style, Stylize as _},
+    style::{Color, Style, Stylize as _},
     text::{Line, Span},
     widgets::{
-        block::{Position, Title},
-        Block, Borders, Paragraph, Widget,
+        block::{Position, Title}, Block, BorderType, Borders, Paragraph, Widget
     },
     Frame, Terminal,
 };
@@ -235,6 +234,7 @@ impl LocalAppState {
         // TODO TODO TODO: Instead set this to set the cancellation token which will eventually
         // lead to exit being set to true
         self.exit = true;
+        self.cancellation_token.cancel();
     }
 
     fn decrease_scroll(&mut self) {
@@ -339,6 +339,9 @@ impl LocalAppState {
                 }
                 _ => bail!("local deploy did not initialize properly"),
             },
+            // TODO TODO TODO: Spawn the tasks using the method used by the superconsole stuff
+            // MAKE SURE THEY'RE WIRED UP WITH THE CANCELLATION TOKEN AS THAT'S ALREADY SET TO
+            // CANCEL
             LocalAppMessage::StartServers => todo!("Can't handle starting server yet"),
             LocalAppMessage::Install(install_message) => match &mut self.kind {
                 LocalAppStateKind::Install(install_state) => {
@@ -355,6 +358,8 @@ impl LocalAppState {
                 _ => bail!("install did not complete properly"),
 
             },
+            // TODO TODO TODO: Almost certainly aren't gonna wrap this up today so can start here
+            // and above handling startServers
             LocalAppMessage::ServerLog(_) => todo!("Can't handle server logs yet"),
         }
     }
@@ -469,7 +474,37 @@ impl LocalApp {
     }
 
     fn render_install_frame(&self, frame: &mut Frame, install_state: &InstallState) {
-        let height = frame.area().height as usize;
+        let text_render_area = if install_state.complete {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(vec![Constraint::Percentage(95), Constraint::Percentage(5)])
+                .split(frame.area());
+
+            let bottom_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
+                .split(layout[1]);
+
+            let continue_text = Line::from(vec![
+                Span::styled("Continue? y/n", Style::new().green().italic().bold()),
+            ]);
+            let continue_paragraph = Paragraph::new(continue_text)
+                .centered()
+                .block(
+                    Block::new()
+                    .borders(Borders::all())
+                    .border_type(BorderType::Thick)
+                    .style(Style::default().green())
+                );
+
+            frame.render_widget(continue_paragraph, bottom_layout[0]);
+
+            layout[0]
+        } else {
+            frame.area()
+        };
+
+        let height = text_render_area.height as usize;
         let line_len = install_state.lines.len();
         let end_index = install_state
             .end_line
@@ -490,31 +525,7 @@ impl LocalApp {
             IntoText::to_text(&joined_lines).expect("failed to convert cargo install output");
         let paragraph = Paragraph::new(lines_as_text);
 
-        let area = frame.area();
-
-        if install_state.complete {
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(vec![Constraint::Percentage(95), Constraint::Percentage(5)])
-                .split(frame.area());
-
-            frame.render_widget(paragraph, layout[0]);
-            
-            let continue_text = vec![
-                "\n".into(),
-                Line::from(vec![
-                    Span::styled("====== Continue? y/n ======", Style::new().green().italic()),
-                ]),
-                "\n".into(),
-            ];
-            let continue_paragraph = Paragraph::new(continue_text)
-                .style(Style::new().green().bold())
-                .left_aligned();
-
-            frame.render_widget(continue_paragraph, layout[1]);
-        } else {
-            frame.render_widget(paragraph, area);
-        }
+        frame.render_widget(paragraph, text_render_area);
     }
 
     fn render_logs_frame(&self, frame: &mut Frame, num_servers: u16, logs_state: &InProgressState) {
@@ -575,10 +586,15 @@ impl LocalApp {
 }
 
 impl Widget for RecentLogs {
-    fn render(self, _area: Rect, _buf: &mut Buffer)
+    fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
     {
+        // TODO: This almost certainly defeats the purpose of using VecDeque at all but :shrug: for
+        // now
+        let joined_lines = self.log_vec.into_iter().collect::<Vec<String>>().join("\n");
+        let lines_as_text = IntoText::to_text(&joined_lines).expect("failed to convert server logs");
+        Paragraph::new(lines_as_text).render(area, buf);
     }
 }
 
