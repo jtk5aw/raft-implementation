@@ -10,18 +10,30 @@ use ratatui::{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style, Stylize as _},
+    style::{Style, Stylize as _},
     text::{Line, Span},
     widgets::{
-        block::{Position, Title}, Block, BorderType, Borders, Paragraph, Widget
+        block::{Position, Title},
+        Block, BorderType, Borders, Paragraph, Widget, Wrap,
     },
     Frame, Terminal,
 };
+use risdb_deploy::local::{start_local_test, ServerArgs};
 use std::{
-    collections::{BTreeMap, VecDeque}, error::Error, fmt::Display, io::{stdout, Stdout}, path::PathBuf, process::Stdio, sync::mpsc::{self, Receiver, Sender}, time::Duration
+    collections::{BTreeMap, VecDeque},
+    error::Error,
+    fmt::Display,
+    io::{stdout, Stdout},
+    path::PathBuf,
+    process::Stdio,
+    sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::runtime::Runtime;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, ChildStdout},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Test RisDb locally or deploy RisDb remotely
@@ -125,15 +137,18 @@ impl Commands {
                     None => sender.send(LocalAppMessage::StartServers)?,
                 };
 
-                let run_result = local_app.run(&mut local_app_state, &mut terminal)
-                    .map_err(|report| {
-                        let root_cause = report.root_cause().downcast_ref::<NoBacktraceError>();
-                        match root_cause {
-                            Some(no_backtrace_error) => 
-                                Report::msg(no_backtrace_error.msg.to_owned()),
-                            None => report
-                        }
-                    });
+                let run_result =
+                    local_app
+                        .run(&mut local_app_state, &mut terminal)
+                        .map_err(|report| {
+                            let root_cause = report.root_cause().downcast_ref::<NoBacktraceError>();
+                            match root_cause {
+                                Some(no_backtrace_error) => {
+                                    Report::msg(no_backtrace_error.msg.to_owned())
+                                }
+                                None => report,
+                            }
+                        });
                 if let Err(err) = restore() {
                     eprintln!(
                         "failed to restore terminal. Run `reset` or exit your terminal to recover: {}",
@@ -207,7 +222,8 @@ struct InstallState {
 }
 
 struct InProgressState {
-    logs: BTreeMap<String, Box<RecentLogs>>,
+    logs: BTreeMap<usize, Box<RecentLogs>>,
+    num_completed: u16,
 }
 
 #[derive(Debug)]
@@ -235,6 +251,23 @@ impl LocalAppState {
         // lead to exit being set to true
         self.exit = true;
         self.cancellation_token.cancel();
+    }
+
+    fn ready_to_exit(&self) -> bool {
+        if !self.exit {
+            return false;
+        }
+
+        match &self.kind {
+            LocalAppStateKind::InProgress(inprogress_state) => {
+                if inprogress_state.num_completed == self.num_servers {
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        }
     }
 
     fn decrease_scroll(&mut self) {
@@ -279,10 +312,12 @@ impl LocalAppState {
         match &mut self.kind {
             LocalAppStateKind::Install(install_app_state) => {
                 if install_app_state.complete {
-                    self.sender.send(LocalAppMessage::StartServers).expect("request to start test servers failed");
+                    self.sender
+                        .send(LocalAppMessage::StartServers)
+                        .expect("request to start test servers failed");
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -290,10 +325,12 @@ impl LocalAppState {
         match &self.kind {
             LocalAppStateKind::Install(install_app_state) => {
                 if install_app_state.complete {
-                    return Err(Report::new(NoBacktraceError::msg("user requested to stop".to_string())));
+                    return Err(Report::new(NoBacktraceError::msg(
+                        "user requested to stop".to_string(),
+                    )));
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -305,6 +342,15 @@ impl LocalAppState {
             KeyCode::Char('j') => self.increase_scroll(),
             KeyCode::Char('y') => self.try_continue(),
             KeyCode::Char('n') => self.try_stop()?,
+            KeyCode::Char('t') => {
+                let _ = self
+                    .sender
+                    .send(LocalAppMessage::ServerLog(ServerLogMessage {
+                        sender_id: 1,
+                        kind: ServerLogMessageKind::Message("This is a test message".to_string()),
+                    }))
+                    .expect("failed to send TODO TODO TODO delete message");
+            }
             _ => {}
         }
         Ok(())
@@ -326,10 +372,10 @@ impl LocalAppState {
 
                     let start_install_sender = self.sender.clone();
                     let start_install_token = self.cancellation_token.clone();
-                    runtime.spawn(LocalAppState::reinstall(
-                            start_install_sender,
-                            start_install_token,
-                            start_install_message
+                    runtime.spawn(Self::reinstall(
+                        start_install_sender,
+                        start_install_token,
+                        start_install_message
                             .path
                             .to_str()
                             .expect("install path is not a valid string")
@@ -339,10 +385,22 @@ impl LocalAppState {
                 }
                 _ => bail!("local deploy did not initialize properly"),
             },
-            // TODO TODO TODO: Spawn the tasks using the method used by the superconsole stuff
-            // MAKE SURE THEY'RE WIRED UP WITH THE CANCELLATION TOKEN AS THAT'S ALREADY SET TO
-            // CANCEL
-            LocalAppMessage::StartServers => todo!("Can't handle starting server yet"),
+            LocalAppMessage::StartServers => match &mut self.kind {
+                LocalAppStateKind::Start | LocalAppStateKind::Install(_) => {
+                    let (children, stdouts) = Self::start_servers(&runtime, self.num_servers);
+
+                    Self::track_processes(&runtime, self.cancellation_token.clone(), children);
+                    let log_tracker = Self::scan_logs(&runtime, self.sender.clone(), stdouts);
+
+                    self.kind = LocalAppStateKind::InProgress(InProgressState {
+                        num_completed: 0,
+                        logs: log_tracker,
+                    });
+
+                    Ok(())
+                }
+                _ => bail!("tried to start deploy at the wrong time"),
+            },
             LocalAppMessage::Install(install_message) => match &mut self.kind {
                 LocalAppStateKind::Install(install_state) => {
                     install_state.lines.extend(install_message.lines);
@@ -356,12 +414,41 @@ impl LocalAppState {
                     Ok(())
                 }
                 _ => bail!("install did not complete properly"),
-
             },
-            // TODO TODO TODO: Almost certainly aren't gonna wrap this up today so can start here
-            // and above handling startServers
-            LocalAppMessage::ServerLog(_) => todo!("Can't handle server logs yet"),
+            LocalAppMessage::ServerLog(server_log_message) => match &mut self.kind {
+                LocalAppStateKind::InProgress(inprogress_state) => {
+                    Self::update_logs(inprogress_state, server_log_message)?;
+                    Ok(())
+                }
+                _ => bail!("logs sent at wrong stage"),
+            },
         }
+    }
+
+    fn update_logs(
+        inprogress_state: &mut InProgressState,
+        server_log_message: ServerLogMessage,
+    ) -> color_eyre::Result<()> {
+        const NUM_NODE_LOGS: usize = 10;
+
+        match server_log_message.kind {
+            ServerLogMessageKind::Message(log_line) => {
+                inprogress_state
+                    .logs
+                    .get_mut(&server_log_message.sender_id)
+                    .map(|recent_logs| {
+                        let log_deque = &mut recent_logs.log_vec;
+                        log_deque.push_back(log_line);
+                        if log_deque.len() > NUM_NODE_LOGS {
+                            log_deque.pop_front();
+                        }
+                    });
+            }
+            ServerLogMessageKind::Close => {
+                inprogress_state.num_completed += 1;
+            }
+        }
+        Ok(())
     }
 
     async fn reinstall(
@@ -412,7 +499,104 @@ impl LocalAppState {
                 .expect("failed to update install progress");
         }
 
-        sender.send(LocalAppMessage::InstallComplete).expect("failed to send install complete");
+        sender
+            .send(LocalAppMessage::InstallComplete)
+            .expect("failed to send install complete");
+    }
+
+    fn start_servers(runtime: &Runtime, num_servers: u16) -> (Vec<Child>, Vec<ChildStdout>) {
+        const FIRST_FRONTEND_PORT: u16 = 5000;
+        const FIRST_RAFT_PORT: u16 = 50_000;
+
+        let raft_ports: Vec<u16> = (FIRST_RAFT_PORT..FIRST_RAFT_PORT + num_servers).collect();
+        let frontend_ports: Vec<u16> =
+            (FIRST_FRONTEND_PORT..FIRST_FRONTEND_PORT + num_servers).collect();
+        let server_args = frontend_ports
+            .into_iter()
+            .zip(raft_ports.into_iter())
+            .map(|(frontend_port, raft_port)| ServerArgs {
+                frontend_port,
+                raft_port,
+            })
+            .collect();
+
+        runtime
+            .block_on(start_local_test(server_args))
+            .into_iter()
+            .unzip()
+    }
+
+    fn track_processes(
+        runtime: &Runtime,
+        cancellation_token: CancellationToken,
+        children: Vec<Child>,
+    ) -> () {
+        children.into_iter().for_each(|mut child| {
+            let cloned_cancellation_token = cancellation_token.clone();
+            runtime.spawn(async move {
+                let _ = cloned_cancellation_token.cancelled().await;
+                let _ = child.kill().await;
+            });
+        });
+    }
+
+    fn scan_logs(
+        runtime: &Runtime,
+        sender: Sender<LocalAppMessage>,
+        stdouts: Vec<ChildStdout>,
+    ) -> BTreeMap<usize, Box<RecentLogs>> {
+        let mut log_tracker = BTreeMap::new();
+        stdouts.into_iter().enumerate().for_each(|(i, stdout)| {
+            // Set up tracker
+            log_tracker.insert(
+                i,
+                Box::new(RecentLogs {
+                    log_vec: VecDeque::new(),
+                }),
+            );
+
+            // Spawn task for reading logs
+            let sender_clone = sender.clone();
+            runtime.spawn(async move {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Err(_err) => {
+                            let close_message = LocalAppMessage::ServerLog(ServerLogMessage {
+                                sender_id: i,
+                                kind: ServerLogMessageKind::Close,
+                            });
+                            sender_clone
+                                .send(close_message)
+                                .expect("failed to send close message");
+                        }
+                        Ok(0) => {
+                            let close_message = LocalAppMessage::ServerLog(ServerLogMessage {
+                                sender_id: i,
+                                kind: ServerLogMessageKind::Close,
+                            });
+                            let _ = sender_clone
+                                .send(close_message)
+                                .expect("failed to send close message");
+                        }
+                        Ok(_) => {
+                            let log_message = LocalAppMessage::ServerLog(ServerLogMessage {
+                                sender_id: i,
+                                kind: ServerLogMessageKind::Message(line.to_owned()),
+                            });
+                            let _ = sender_clone
+                                .send(log_message)
+                                .expect("failed to send log message");
+                        }
+                    }
+                }
+            });
+        });
+
+        log_tracker
     }
 }
 
@@ -431,9 +615,15 @@ struct StartInstallMessage {
 struct InstallMessage {
     lines: Vec<String>,
 }
+
 struct ServerLogMessage {
     sender_id: usize,
-    message: String,
+    kind: ServerLogMessageKind,
+}
+
+enum ServerLogMessageKind {
+    Close,
+    Message(String),
 }
 
 #[derive(Debug, Clone)]
@@ -455,21 +645,22 @@ impl LocalApp {
         local_app_state: &mut LocalAppState,
         terminal: &mut Tui,
     ) -> color_eyre::Result<()> {
-        while !local_app_state.exit {
-            terminal.draw(|frame| match &local_app_state.kind {
-                LocalAppStateKind::Install(install_state) => {
-                    self.render_install_frame(frame, install_state)
-                }
-                LocalAppStateKind::InProgress(recent_logs) => {
-                    self.render_logs_frame(frame, local_app_state.num_servers, &recent_logs)
-                }
-                _ => {}
-            })
-            .wrap_err("failed to draw")?;
+        while !local_app_state.ready_to_exit() {
+            terminal
+                .draw(|frame| match &local_app_state.kind {
+                    LocalAppStateKind::Install(install_state) => {
+                        self.render_install_frame(frame, install_state)
+                    }
+                    LocalAppStateKind::InProgress(recent_logs) => {
+                        self.render_logs_frame(frame, local_app_state.num_servers, &recent_logs)
+                    }
+                    _ => {}
+                })
+                .wrap_err("failed to draw")?;
 
             self.handle_events(local_app_state)
                 .wrap_err("failed to handle events")?;
-            }
+        }
         Ok(())
     }
 
@@ -485,17 +676,16 @@ impl LocalApp {
                 .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
                 .split(layout[1]);
 
-            let continue_text = Line::from(vec![
-                Span::styled("Continue? y/n", Style::new().green().italic().bold()),
-            ]);
-            let continue_paragraph = Paragraph::new(continue_text)
-                .centered()
-                .block(
-                    Block::new()
+            let continue_text = Line::from(vec![Span::styled(
+                "Continue? y/n",
+                Style::new().green().italic().bold(),
+            )]);
+            let continue_paragraph = Paragraph::new(continue_text).centered().block(
+                Block::new()
                     .borders(Borders::all())
                     .border_type(BorderType::Thick)
-                    .style(Style::default().green())
-                );
+                    .style(Style::default().green()),
+            );
 
             frame.render_widget(continue_paragraph, bottom_layout[0]);
 
@@ -561,7 +751,7 @@ impl LocalApp {
     fn handle_events(&mut self, local_app_state: &mut LocalAppState) -> color_eyre::Result<()> {
         // Read for keyboard events
         // Polling guarantees that an event will be there
-        if poll(Duration::from_millis(1))? {
+        if poll(Duration::from_micros(50))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => local_app_state
                     .handle_key_event(key_event)
@@ -571,7 +761,7 @@ impl LocalApp {
         }
 
         // Read for message events
-        match self.receiver.recv_timeout(Duration::from_millis(1)) {
+        match self.receiver.recv_timeout(Duration::from_micros(50)) {
             Ok(message) => local_app_state
                 .handle_message(&self.runtime, message)
                 .wrap_err("handling recv failed"),
@@ -593,8 +783,11 @@ impl Widget for RecentLogs {
         // TODO: This almost certainly defeats the purpose of using VecDeque at all but :shrug: for
         // now
         let joined_lines = self.log_vec.into_iter().collect::<Vec<String>>().join("\n");
-        let lines_as_text = IntoText::to_text(&joined_lines).expect("failed to convert server logs");
-        Paragraph::new(lines_as_text).render(area, buf);
+        let lines_as_text =
+            IntoText::to_text(&joined_lines).expect("failed to convert server logs");
+        Paragraph::new(lines_as_text)
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
     }
 }
 
@@ -722,9 +915,6 @@ impl Widget for RecentLogs {
 //     }
 // }
 //
-// const FIRST_FRONTEND_PORT: u16 = 5000;
-// const FIRST_RAFT_PORT: u16 = 50_000;
-// const NUM_NODE_LOGS: usize = 10;
 //
 // impl LocalArgs {
 //     async fn execute(self, cancellation_token: CancellationToken) {
